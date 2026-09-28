@@ -301,12 +301,25 @@ This ships as usable, not finished. What is measured, and what is not.
 Every one of these is reported by the tooling rather than hidden — `cursor_doctor` lists what a session
 approximated, and `cursor_status` shows the counters.
 
+## Documentation
+
+| Document | What it covers |
+|---|---|
+| [`docs/CONCEPTS-AND-CONTRACTS.md`](docs/CONCEPTS-AND-CONTRACTS.md) | **Start here.** What a conversation, a resume and a token actually are; Cursor's full field map; what ZCode sends and what happens to it — system prompt composition, steering, compaction, tool results, the streaming contract, cancellation |
+| [`docs/HARNESS-AUDIT.md`](docs/HARNESS-AUDIT.md) | The four defects found, the research behind the fixes, and what remains open |
+| [`docs/ZCODE-PROVIDER-MAPPING.md`](docs/ZCODE-PROVIDER-MAPPING.md) | How ZCode natively resolves a provider: the closed API enum, the strict config schema, the rule chain, `optionSpecs`, and the absence of model discovery |
+| [`docs/RESEARCH-FINDINGS.md`](docs/RESEARCH-FINDINGS.md) | The original cited dossier: protocol reverse-engineering, host contracts, options considered and rejected |
+| [`docs/REVIEW-REPORT.md`](docs/REVIEW-REPORT.md) | The adversarial review that shaped the protocol code |
+
 ## Repository layout
 
 ```
 marketplace.json                     the plugin catalogue — add this folder as a marketplace
 docs/
-  RESEARCH-FINDINGS.md              cited research dossier: protocol, host contracts, options
+  CONCEPTS-AND-CONTRACTS.md          concepts, Cursor field map, ZCode host behaviour
+  HARNESS-AUDIT.md                   the four defects, the research, and what is open
+  ZCODE-PROVIDER-MAPPING.md          how ZCode natively resolves a provider
+  RESEARCH-FINDINGS.md               cited research dossier: protocol, host contracts, options
   REVIEW-REPORT.md                   adversarial review of the protocol implementation
 cursor-subscription/
   .zcode-plugin/plugin.json          plugin manifest
