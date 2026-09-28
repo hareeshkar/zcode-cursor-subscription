@@ -139,8 +139,18 @@ orrinzeng (MIT), which does the same thing for DeepSeek Harness. `proto.mjs`, `a
 ## Development
 
 ```sh
-node --test test/*.test.mjs
+node --test test/*.test.mjs          # 73 unit tests, no quota
+CURSOR_LIVE_TESTS=1 node test/live-roundtrip.mjs [models]
+CURSOR_LIVE_TESTS=1 node test/live-conversation.mjs [model]
+node test/sad-paths.mjs              # malformed input; one real completion
 ```
+
+The live probes spend real quota and refuse to run unless `CURSOR_LIVE_TESTS=1`. They exist because
+the biggest defect in this project was invisible to unit tests: every layer encoded correctly and
+tool calling still did nothing. See [`docs/HARNESS-AUDIT.md`](../docs/HARNESS-AUDIT.md).
+
+`CURSOR_SHIM_DEBUG=1` prints every frame kind, every exec case and the raw bytes of each exec. It is
+what turns "the tool call does not fire" into a specific unknown field number in one run.
 
 The research dossier — protocol field maps, host contracts, the alternatives considered and why they
 were rejected — is in [`docs/RESEARCH-FINDINGS.md`](../docs/RESEARCH-FINDINGS.md). The adversarial

@@ -63,6 +63,18 @@ export const TOOL_REJECT_REASON =
  */
 export const SHIM_SERVICE = "cursor-subscription-shim";
 
+/**
+ * Ceilings on exec traffic within a single run.
+ *
+ * Refusing an exec and continuing is a loop unless something bounds it. A model
+ * that re-asks a refused tool forever would burn the user's quota and hold the
+ * host's model stream open until its idle timeout, so the run is ended and
+ * reported instead. Both are far above anything a converging turn produces —
+ * a working tool call is typically the third exec.
+ */
+const MAX_EXECS_PER_RUN = 24;
+const MAX_REFUSALS_PER_FIELD = 6;
+
 // ---------------------------------------------------------------------------
 // OpenAI message → Cursor conversation
 // ---------------------------------------------------------------------------
@@ -76,6 +88,23 @@ const DONE = "data: [DONE]\n\n";
 
 function openAiError(message, type = "cursor_error", code = "cursor_error") {
 	return { error: { message, type, param: null, code } };
+}
+
+/**
+ * A fault attributable to the caller, not to the shim.
+ *
+ * Exists so the distinction survives the async boundary: a thrown `Error` from
+ * request handling is a 5xx, and a client mistake reported as a 5xx is a lie
+ * the host will act on.
+ */
+class ClientError extends Error {
+	constructor(message, type = "invalid_request", code = "bad_request", status = 400) {
+		super(message);
+		this.name = "ClientError";
+		this.type = type;
+		this.code = code;
+		this.status = status;
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -406,14 +435,43 @@ export class CursorShim {
 		);
 	}
 
+	/**
+	 * Read and parse the request body.
+	 *
+	 * Throws a `ClientError` rather than letting a JSON syntax error escape as
+	 * a generic failure: unparseable input is the caller's mistake, and
+	 * reporting it as a shim fault sends the host looking for a server bug that
+	 * does not exist.
+	 */
 	async #readBody(request) {
 		const chunks = [];
 		for await (const chunk of request) chunks.push(chunk);
-		return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+		const raw = Buffer.concat(chunks).toString("utf8");
+		if (raw.trim().length === 0) return {};
+		try {
+			const parsed = JSON.parse(raw);
+			if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+				throw new ClientError("request body must be a JSON object", "invalid_request", "bad_request");
+			}
+			return parsed;
+		} catch (error) {
+			if (error instanceof ClientError) throw error;
+			throw new ClientError(`request body is not valid JSON (${error.message})`, "invalid_request", "bad_json");
+		}
 	}
 
 	async #chatCompletions(request, response) {
-		const body = await this.#readBody(request);
+		let body;
+		try {
+			body = await this.#readBody(request);
+		} catch (error) {
+			// A 4xx here, not a 5xx: the host can act on it, retry it is not worth.
+			response.writeHead(error.status ?? 400, { "content-type": "application/json" });
+			response.end(
+				JSON.stringify(openAiError(error.message, error.type ?? "invalid_request", error.code ?? "bad_request")),
+			);
+			return;
+		}
 		const messages = Array.isArray(body.messages) ? body.messages : [];
 		if (messages.length === 0) {
 			response.writeHead(400, { "content-type": "application/json" });
@@ -507,6 +565,8 @@ export class CursorShim {
 
 		let text = "";
 		let reasoning = "";
+		let execs = 0;
+		const refusals = {};
 		let toolCall = null;
 		let completionTokens = 0;
 		let promptTokens = 0;
@@ -515,6 +575,9 @@ export class CursorShim {
 		try {
 			for await (const payload of run.frames()) {
 				for (const frame of splitServerMessage(payload)) {
+					if (process.env.CURSOR_SHIM_DEBUG) {
+						this.log(`frame kind=${frame.kind} bytes=${frame.payload?.length ?? 0}`);
+					}
 					if (frame.kind === "interaction") {
 						const update = decodeInteractionUpdate(frame.payload);
 						if (update.type === "textDelta") {
@@ -558,6 +621,9 @@ export class CursorShim {
 						}
 					} else if (frame.kind === "exec") {
 						const exec = decodeExecServerMessage(frame.payload);
+						if (process.env.CURSOR_SHIM_DEBUG) {
+							this.log(`exec case=${exec.case} field=${exec.field} id=${exec.id} tools=${tools.length}`);
+						}
 						if (exec.case === "requestContextArgs") {
 							// Cursor asks for the tool schemas as an exec. Answering on
 							// the stream is the only shape the server accepts; a bare
@@ -565,11 +631,39 @@ export class CursorShim {
 							run.sendToolDefinitions(exec.id, exec.execId, tools);
 							continue;
 						}
-						toolCall = exec;
-						// Stop now: Cursor keeps its state server-side and the next ZCode
-						// turn resumes it from the checkpoint.
-						run.end();
-						break;
+						if (exec.case === "mcpArgs") {
+							// The one exec that ends the run. Cursor holds its state
+							// server-side, and the next ZCode turn resumes it from the
+							// checkpoint with the tool result attached.
+							toolCall = exec;
+							run.end();
+							break;
+						}
+						// Everything else — Cursor's own filesystem and shell tools, and
+						// exec variants newer than this build — is refused on its own
+						// field number and the run keeps going. Treating them as a tool
+						// call instead is what silently disabled tool calling: the model
+						// asked, the exec arrived, and the turn ended as a plain `stop`
+						// with no tool_calls for the host to run.
+						//
+						// Bounded, because "refuse and continue" is a loop unless something
+						// stops it. A model that keeps re-asking the same refused tool must
+						// not burn the user's quota or hold the host's stream open: past
+						// the cap the run is ended and reported, never left hanging.
+						execs += 1;
+						if (execs > MAX_EXECS_PER_RUN || refusals[exec.field] >= MAX_REFUSALS_PER_FIELD) {
+							this.log(
+								"run did not converge on a tool call",
+								`${execs} execs, field ${exec.field} refused ${refusals[exec.field] ?? 0} times`,
+							);
+							run.end();
+							break;
+						}
+						if (typeof exec.field === "number") {
+							refusals[exec.field] = (refusals[exec.field] ?? 0) + 1;
+							run.rejectExec(exec.id, exec.execId, exec.field, TOOL_REJECT_REASON);
+						}
+						continue;
 					}
 				}
 				if (toolCall) break;

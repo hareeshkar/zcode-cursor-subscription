@@ -259,7 +259,9 @@ ZCode provider was a port, not a copy — and most of the work is the part that 
 | **Diagnostics** | `cursor_doctor` compares session, shim and provider entry and names the disagreement — probing the socket rather than trusting a startup decision |
 | **Clean uninstall** | A teardown that removes the credential, the provider, the model rules, the install record, the cache and the data dir, and verifies nothing survived |
 | **Review** | An adversarial review pass ([`docs/REVIEW-REPORT.md`](docs/REVIEW-REPORT.md)) that found nine critical defects, ten independently reproduced |
-| **Tests** | 63 tests over the protocol codec, the credential store, the resume interlock, port selection, registration, teardown and diagnosis |
+| **Tests** | 73 unit tests plus live probes that spend a real request: a full tool round trip, agent behaviour across turns (tool choice, mid-session steering, system-prompt retention), and a malformed-input matrix. The live probes are gated behind `CURSOR_LIVE_TESTS=1` and never run in CI |
+| **Error taxonomy** | A caller's mistake is a 4xx (`bad_json`, `no_messages`); a shim fault is a 5xx. A client error reported as a server fault sends the host hunting a bug that does not exist |
+| **Loop safety** | Refusing an exec and continuing is a loop unless bounded, so a run is capped at 24 execs and 6 refusals of one field, and is then ended and logged rather than left hanging |
 
 Roughly **62% of the shipped code is new**; the derived third is the transport and auth layer listed
 per-file in [`NOTICE.md`](cursor-subscription/NOTICE.md).
@@ -272,8 +274,9 @@ This ships as usable, not finished. Two things are measured rather than assumed:
   live account, Cursor sent no resume checkpoint, so `cursor_status` reports a resume rate of 0 and
   every turn is a full replay. The interlock that decides is tested and correct; the other side of it
   has not been seen arrive. Do not promise a token saving.
-- **Tool calls have never been observed firing.** The translation is decoded against the reference
-  schema and unit-tested, but no model has yet asked for one in a live run.
+- **Tool calls now work, and are verified live.** They did not work at all until 0.4.0 — see
+  [`docs/HARNESS-AUDIT.md`](docs/HARNESS-AUDIT.md) for the defect. A model emitting a call, the host
+  running it, and the model using the result are now proven on Composer, Grok, GPT and Claude.
 
 Neither is a claim of success. Both are reported by the tooling rather than hidden, and both would show
 up immediately in `cursor_status` if they changed.

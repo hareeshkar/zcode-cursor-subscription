@@ -172,6 +172,11 @@ export function encodeMcpToolDefinition({ name, description, inputSchema, provid
 	return writer.finish();
 }
 
+/** McpResult { success=1 | error=2 { message=1 } } — the generic "not available" reply. */
+export function encodeMcpError(error) {
+	return new Writer().message(2, new Writer().string(1, error).finish()).finish();
+}
+
 /** RequestContextResult { RequestContextSuccess = 1 { tools = 7 } } */
 export function encodeRequestContextResult(tools) {
 	const context = new Writer();
@@ -623,6 +628,23 @@ export class AgentRun {
 		}
 	}
 
+	/**
+	 * Refuse an exec this build does not implement.
+	 *
+	 * Answered on the exec's *own* field number: the server routes the reply by
+	 * that slot, so silence leaves the run waiting forever. Cursor adds exec
+	 * variants without notice, and every coherent reply — even a refusal —
+	 * resumes the run, which is what lets the model fall back to the tools that
+	 * do exist.
+	 */
+	rejectExec(id, execId, field, reason) {
+		this.#write(
+			encodeExecClientMessageEnvelope(
+				encodeExecClientMessage(id, execId, field, encodeMcpError(reason)),
+			),
+		);
+	}
+
 	#write(payload) {
 		if (this.#closed || this.#stream.destroyed) return;
 		this.#stream.write(frameEncode(payload));
@@ -645,11 +667,16 @@ export class AgentRun {
 	 * accepting a bare top-level push, and silence here stalls the run.
 	 */
 	sendToolDefinitions(id, execId, tools) {
-		this.#write(
-			encodeExecClientMessageEnvelope(
-				encodeExecClientMessage(id, execId, 10, encodeRequestContextResult(tools)),
-			),
+		const payload = encodeExecClientMessageEnvelope(
+			encodeExecClientMessage(id, execId, 10, encodeRequestContextResult(tools)),
 		);
+		if (process.env.CURSOR_SHIM_DEBUG) {
+			process.stderr.write(
+				`cursor-subscription: sent ${tools.length} tool definitions on field 10 ` +
+					`(${payload.length} bytes, stream destroyed=${this.#stream?.destroyed})\n`,
+			);
+		}
+		this.#write(payload);
 	}
 
 	/** End the run. Safe to call more than once. */

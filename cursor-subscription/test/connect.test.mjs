@@ -15,6 +15,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { ensureShimProvider } from "../lib/register-provider.mjs";
+import { planTurn } from "../lib/conversation-store.mjs";
+import { renderColdStartHistory } from "../lib/conversation.mjs";
 
 const BASE = "http://127.0.0.1:8477/v1";
 
@@ -115,4 +117,41 @@ test("a moved shim is repaired, not duplicated", async () => {
 	const ours = written.config.providerConfigRules.providerRules.filter((r) => r.providerName === "Cursor Subscription");
 	assert.equal(ours.length, 1);
 	assert.equal(ours[0].config.api.baseUrl, BASE, "the entry follows the shim to its real port");
+});
+
+// --- context delivery across a tool round ---------------------------------
+
+const system = { role: "system", content: "system rules" };
+const ask1 = { role: "user", content: "read the file" };
+const call = { id: "c1", type: "function", function: { name: "read_file", arguments: "{}" } };
+const withTool = [
+	system,
+	ask1,
+	{ role: "assistant", content: null, tool_calls: [call] },
+	{ role: "tool", tool_call_id: "c1", content: "FILE_CONTENTS" },
+	{ role: "user", content: "what did it say?" },
+];
+
+test("a tool result forces a replay, so it is never dropped on a resumed turn", () => {
+	// Resuming would send only the newest user message as the action, and the
+	// tool result Cursor never saw would be lost. The interlock has to refuse.
+	const plan = planTurn([system, ask1], withTool);
+	assert.equal(plan.resumable, false, "must not resume across an unseen tool result");
+	assert.equal(plan.suffix.length, withTool.length, "the whole history is the suffix");
+});
+
+test("the cold start carries the tool result, labelled as one", () => {
+	// The other half of the guarantee: refusing to resume only helps if the
+	// replay actually contains the result.
+	const { history, lastUser } = renderColdStartHistory(withTool);
+	assert.ok(history.includes("FILE_CONTENTS"), "the tool result reaches the model");
+	assert.ok(history.includes("[TOOL RESULT]"), "and is distinguishable from a user request");
+	assert.equal(lastUser, "what did it say?", "the newest user turn is the action");
+});
+
+test("the system prompt is never replayed as conversation text", () => {
+	// It is published as a blob instead. Repeating it inline would both waste
+	// tokens and let a model treat its own instructions as user content.
+	const { history } = renderColdStartHistory(withTool);
+	assert.ok(!history.includes("system rules"), "the system prompt is not in the transcript");
 });

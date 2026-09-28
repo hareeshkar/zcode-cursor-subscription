@@ -730,7 +730,7 @@ async function handle(message) {
 			return reply({
 				protocolVersion: PROTOCOL_VERSION,
 				capabilities: { tools: {} },
-				serverInfo: { name: "cursor-subscription", version: "0.3.0" },
+				serverInfo: { name: "cursor-subscription", version: "0.4.0" },
 			});
 		case "notifications/initialized":
 			return;
