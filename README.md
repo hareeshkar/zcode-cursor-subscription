@@ -75,11 +75,66 @@ sequenceDiagram
     end
 ```
 
+### Resume or replay
+
+ZCode rewrites history constantly — auto-compaction, microcompaction, an edit, a branch. Cursor's
+server-side conversation cannot be safely resumed across any of those: it would be reasoning about
+messages the user can no longer see, with no error anywhere.
+
+So the shim records what it committed to Cursor, and checks every turn whether the incoming history is an
+**exact extension** of it.
+
+```mermaid
+flowchart TD
+    A["New turn arrives"] --> B{"Is the message list an exact<br/>extension of what Cursor<br/>already holds?"}
+    B -->|"yes"| C["Resume the server-side conversation,<br/>send only the new turn"]
+    B -->|"no — compacted, edited<br/>or branched"| D["Full replay of the<br/>whole history"]
+    C --> E["Counted as resumed"]
+    D --> F["Counted as replayed"]
+```
+
+Because the check covers the *whole prefix*, every operation that rewrites history forces a replay
+automatically. The worst case costs exactly what a replay-only design would cost, and never worse.
+
+`cursor_status` reports the **resume rate** — the share of turns that reused Cursor's context. That is
+the honest number: Cursor exposes no cache-hit telemetry to third-party clients, so a "cache hit rate"
+is not something this plugin can claim.
+
+### Two ZCode sessions, one port
+
+Not an edge case — anyone with two windows hits it at once. Whoever loses the port race does not fail,
+and does not start a duplicate shim holding a second copy of your Cursor token.
+
+```mermaid
+stateDiagram-v2
+    [*] --> TryBind
+    TryBind --> Own : bind succeeded,<br/>port recorded
+    TryBind --> CheckPeer : EADDRINUSE
+    CheckPeer --> Adopt : /health answers<br/>as one of ours
+    CheckPeer --> TryBind : not ours —<br/>try the next port
+    Adopt --> Watching
+    Watching --> Own : peer exited,<br/>take the port over
+    Watching --> Adopt : peer still serving
+    Own --> [*]
+```
+
+`cursor_doctor` probes the socket rather than trusting that decision, so a dead port reads as dead. That
+distinction was learned the hard way: an earlier version reported *"Everything checks out"* while nothing
+was listening and every completion failed with `fetch failed`.
+
 ## Install
 
 This plugin is **not on the official ZCode plugin marketplace.** ZCode's marketplace system takes a
 *directory* of plugins, so you clone this repository and register it as your own marketplace. Nothing
 is published to a shared registry, and installing makes no network call.
+
+> **Installing with an AI agent?** Hand it [`AGENTS.md`](./AGENTS.md) instead of walking it through by
+> hand. That file is written for exactly this: the safety rules an agent must not break (never print a
+> credential, never edit ZCode's config, never retry a failed run), the exact clone-and-register steps
+> for macOS, Linux and Windows including how to get the absolute path, how to connect safely by adopting
+> the existing Cursor session instead of re-authenticating, how to verify, and a failure table where each
+> symptom has a different remedy. Ask your agent: *"Read AGENTS.md in this repository and install the
+> plugin."*
 
 **Prerequisites**
 
@@ -208,6 +263,20 @@ ZCode provider was a port, not a copy — and most of the work is the part that 
 
 Roughly **62% of the shipped code is new**; the derived third is the transport and auth layer listed
 per-file in [`NOTICE.md`](cursor-subscription/NOTICE.md).
+
+### Known limits, stated plainly
+
+This ships as usable, not finished. Two things are measured rather than assumed:
+
+- **Server-side conversation reuse has never actually engaged.** Across every real turn run against a
+  live account, Cursor sent no resume checkpoint, so `cursor_status` reports a resume rate of 0 and
+  every turn is a full replay. The interlock that decides is tested and correct; the other side of it
+  has not been seen arrive. Do not promise a token saving.
+- **Tool calls have never been observed firing.** The translation is decoded against the reference
+  schema and unit-tested, but no model has yet asked for one in a live run.
+
+Neither is a claim of success. Both are reported by the tooling rather than hidden, and both would show
+up immediately in `cursor_status` if they changed.
 
 ## Repository layout
 
