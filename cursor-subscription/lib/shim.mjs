@@ -754,7 +754,6 @@ export class CursorShim {
 			// fallback: fewer moving parts, and its behaviour is understood.
 			structuredHistory: STRUCTURED_HISTORY,
 			turnsInState: TURNS_IN_STATE,
-			turnsInState: TURNS_IN_STATE,
 		});
 
 		const run = { toolNames, model, messages, blobStore, conversationId };
@@ -794,6 +793,30 @@ export class CursorShim {
 					if (frame.kind === "unknown") {
 						this.#note(`inbound frame arm ${frame.field} is not decoded`);
 						this.#unknownFrames.set(frame.field, (this.#unknownFrames.get(frame.field) ?? 0) + 1);
+					}
+					if (frame.kind === "ttft") {
+						// Arm 8: timing telemetry, informational. The numbers are the
+						// honest latency record and belong in the debug log.
+						const ttft = decodeTtftBreakdown(frame.payload);
+						if (process.env.CURSOR_SHIM_DEBUG) {
+							this.log(
+								`ttft server=${ttft.serverFirstTokenMs ?? "?"}ms provider=${ttft.providerTtftMs ?? "?"}ms`,
+							);
+						}
+					} else if (frame.kind === "abort") {
+						// Arm 5: the server is aborting. End rather than wait out the
+						// idle timeout.
+						this.log("server sent an abort control message");
+						run.end();
+						break;
+					} else if (frame.kind === "query") {
+						// Arm 7: the server asking for something. An InteractionResponse
+						// counterpart exists, so an unanswered one may stall the run —
+						// counted loudly until each kind has a real reply.
+						const query = decodeInteractionQuery(frame.payload);
+						const key = `query:${query.kind}`;
+						this.#unanswered.set(key, (this.#unanswered.get(key) ?? 0) + 1);
+						this.log("interaction query left unanswered", key);
 					}
 					if (process.env.CURSOR_SHIM_DEBUG) {
 						this.log(`frame kind=${frame.kind}${frame.field === undefined ? "" : ` arm=${frame.field}`} bytes=${frame.payload?.length ?? 0}`);
