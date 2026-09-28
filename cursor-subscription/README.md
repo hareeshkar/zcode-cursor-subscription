@@ -136,6 +136,24 @@ orrinzeng (MIT), which does the same thing for DeepSeek Harness. `proto.mjs`, `a
 `cursor-client.mjs` are derived from it; everything else here is new. See
 [`NOTICE.md`](./NOTICE.md) for the per-file derivation, and [`LICENSE`](./LICENSE).
 
+## Request controls
+
+ZCode can send request parameters Cursor's run request has no field for. Rather
+than dropping them, each is either honoured by construction or reported:
+
+| Host sends | What happens |
+|---|---|
+| `tool_choice: "none"` | No tools are registered — a host told "none" that still receives a tool call has been lied to |
+| `tool_choice: {function: {name}}` | Only that tool is registered; the rest would let the model pick what the host ruled out |
+| `tool_choice: "required"` | Not expressible; reported, because the model may still answer in prose |
+| `parallel_tool_calls: false` | Honoured — the run already ends at the first tool call |
+| `response_format: json_object` / `json_schema` | Folded into the system prompt as an instruction, aiming the model at the schema |
+| `temperature`, `top_p`, `stop`, `seed`, penalties | Named as inexpressible rather than silently ignored |
+
+`cursor_doctor` lists any approximation a session has used, so the difference
+between "the shim is broken" and "the shim is approximating, and here is exactly
+where" is visible in one call.
+
 ## Development
 
 ```sh

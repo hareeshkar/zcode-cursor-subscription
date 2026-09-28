@@ -15,8 +15,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { ensureShimProvider, reconcileProviderKey } from "../lib/register-provider.mjs";
-import { planTurn } from "../lib/conversation-store.mjs";
-import { renderColdStartHistory } from "../lib/conversation.mjs";
+import { hashMessage, planTurn } from "../lib/conversation-store.mjs";
+import { buildColdStart, renderColdStartHistory } from "../lib/conversation.mjs";
 
 const BASE = "http://127.0.0.1:8477/v1";
 
@@ -238,4 +238,32 @@ test("reconciliation never creates a provider or touches one that is not ours", 
 	const result = await reconcileProviderKey({ baseUrl: BASE, apiKey: "k", path });
 	assert.equal(result.repaired, false);
 	assert.equal(await readFile(path, "utf8"), before, "the file is untouched");
+});
+
+test("a system-prompt change forces a cold start, so a new instruction lands", () => {
+	// A late `response_format` instruction rides in the system text, which lives
+	// in the checkpoint. If editing the system prompt could still resume, that
+	// instruction would be silently dropped for the rest of the session.
+	const sys1 = { role: "system", content: "original rules" };
+	const sys2 = { role: "system", content: "original rules, plus: reply as JSON" };
+	const user = { role: "user", content: "hi" };
+	// `committed` is a list of prefix hashes, not messages: that is what the
+	// store holds, and comparing objects to hashes always diverges.
+	const committed = [sys1, user].map(hashMessage);
+
+	assert.equal(planTurn(committed, [sys2, user]).resumable, false, "a system change must replay");
+	assert.equal(
+		planTurn(committed, [sys1, user, { role: "user", content: "again" }]).resumable,
+		true,
+		"an unchanged prefix with a new turn may resume",
+	);
+});
+
+test("an appended instruction reaches the system blob, and is not duplicated inline", () => {
+	const messages = [{ role: "system", content: "base rules" }, { role: "user", content: "hi" }];
+	const { systemText, history } = buildColdStart(messages, "Respond with a single valid JSON object.");
+
+	assert.ok(systemText.includes("base rules"), "the harness system prompt is preserved");
+	assert.ok(systemText.includes("valid JSON object"), "the appended instruction is included");
+	assert.ok(!history.includes("base rules"), "and it is not repeated as conversation text");
 });

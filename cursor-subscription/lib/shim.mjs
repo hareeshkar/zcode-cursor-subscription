@@ -107,6 +107,52 @@ class ClientError extends Error {
 	}
 }
 
+/**
+ * Translate the host's request controls into what this shim can actually do.
+ *
+ * Pure and exported so the mapping is testable without a live call. What it
+ * decides — whether to register tools at all, whether a structured-output
+ * request can be honoured — is exactly the kind of thing that drifts silently.
+ */
+export function planRequestControls(body = {}) {
+	const notes = [];
+	const choice = body.tool_choice;
+	const only =
+		choice && typeof choice === "object" && typeof choice.function?.name === "string"
+			? choice.function.name
+			: undefined;
+	const suppressTools = choice === "none";
+
+	// Cursor's run request has no field for any of these, so each is either
+	// honoured by construction or declared as an approximation. Ignoring one is
+	// not neutral: a host told "none" that still receives a tool call has been
+	// lied to, and nothing downstream can tell.
+	if (choice === "required") notes.push("tool_choice=required is not expressible; the model may answer in prose");
+	if (suppressTools) notes.push("tool_choice=none honoured: no tools registered");
+	if (only) notes.push("tool_choice pinned to " + only + "; other tools were not registered");
+	if (body.parallel_tool_calls === false) {
+		notes.push("parallel_tool_calls=false honoured: the run ends at the first tool call");
+	}
+	for (const field of ["temperature", "top_p", "stop", "seed", "frequency_penalty", "presence_penalty"]) {
+		if (body[field] !== undefined) notes.push(field + " is not expressible in Cursor's run request");
+	}
+
+	let extraSystem = "";
+	const format = body.response_format;
+	if (format && typeof format === "object") {
+		if (format.type === "json_object") {
+			extraSystem = "Respond with a single valid JSON object and nothing else.";
+		} else if (format.type === "json_schema") {
+			extraSystem =
+				"Respond with a single valid JSON value that conforms to this JSON Schema, and nothing else:\n" +
+				JSON.stringify(format.json_schema?.schema ?? {});
+		} else if (format.type && format.type !== "text") {
+			notes.push("response_format=" + format.type + " is not supported; the model may answer in prose");
+		}
+	}
+	return { suppressTools, only, extraSystem, notes };
+}
+
 // ---------------------------------------------------------------------------
 // Shim
 // ---------------------------------------------------------------------------
@@ -151,6 +197,8 @@ export class CursorShim {
 	// and what we last did with it. Frames still arriving means the model is
 	// working; silence right after an unanswered exec means it is waiting on us.
 	#liveness = { frames: 0, lastFrameAt: 0, lastAction: "none" };
+	/** Host requests the shim cannot express, surfaced rather than swallowed. */
+	#approximations = new Map();
 
 	constructor(options = {}) {
 		this.#store = options.store ?? new CredentialStore();
@@ -203,15 +251,30 @@ export class CursorShim {
 			resumeRate:
 				this.#stats.turns === 0 ? 0 : Number((this.#stats.resumed / this.#stats.turns).toFixed(3)),
 			conversations: this.#conversations.size,
+			// The keys, not the counts: the Map is message → times-seen, and a bare
+			// count would say nothing about what was approximated.
+			approximations: [...this.#approximations.keys()],
 			frames: this.#liveness.frames,
 			lastFrameAt: this.#liveness.lastFrameAt,
 			lastAction: this.#liveness.lastAction,
 		};
 	}
 
+	/**
+	 * Record a host request this shim cannot express faithfully.
+	 *
+	 * Silently dropping one is the failure this project exists to avoid: a host
+	 * that asked for no tools, or for JSON, and got something else, has been lied
+	 * to, and nothing downstream can tell.
+	 */
+	#note(message) {
+		this.#approximations.set(message, (this.#approximations.get(message) ?? 0) + 1);
+	}
+
 	resetMetrics() {
 		this.#stats = { turns: 0, resumed: 0, replayed: 0, toolCalls: 0, toolRequests: 0, droppedToolCalls: 0 };
 		this.#liveness = { frames: 0, lastFrameAt: 0, lastAction: "none" };
+		this.#approximations.clear();
 		this.#conversations.clear();
 	}
 
@@ -526,15 +589,24 @@ export class CursorShim {
 			this.#stats.replayed += 1;
 		}
 
+		// The host's request controls, translated into what this protocol can
+		// express. Anything it cannot is recorded rather than quietly ignored.
+		const controls = planRequestControls(body);
+		for (const note of controls.notes) this.#note(note);
+		const extraSystem = controls.extraSystem;
+
 		// Register the host's own tools with Cursor so the model calls *them*,
 		// not Cursor's built-ins. This is what keeps execution inside ZCode.
 		const declared = Array.isArray(body.tools) ? body.tools : [];
 		const toolNames = new Set();
 		const encodedTools = [];
-		for (const tool of declared) {
+		for (const tool of controls.suppressTools ? [] : declared) {
 			const fn = tool?.function;
 			const name = typeof fn?.name === "string" ? fn.name : "";
 			if (!name) continue;
+			// A named choice is a filter, not a hint: registering the rest would
+			// leave the model free to pick something the host ruled out.
+			if (controls.only && name !== controls.only) continue;
 			toolNames.add(name);
 			encodedTools.push(
 				encodeMcpToolDefinition({

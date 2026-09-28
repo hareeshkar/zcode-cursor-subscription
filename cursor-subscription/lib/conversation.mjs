@@ -136,8 +136,10 @@ export function lastUserMessage(messages) {
 }
 
 /** Publish the system prompt as a blob and build a cold-start conversation state. */
-export function buildColdStart(messages) {
-	const systemText = collectSystemText(messages);
+export function buildColdStart(messages, extraSystem = "") {
+	const systemText = [collectSystemText(messages), extraSystem]
+		.filter((part) => part.trim().length > 0)
+		.join("\n\n");
 	const blobStore = new Map();
 	const rootPromptBlobIds = [];
 
@@ -177,7 +179,7 @@ export function buildColdStart(messages) {
  * @param {string} input.model     the Cursor model id.
  * @returns {Uint8Array} an `AgentClientMessage`.
  */
-export function buildRunRequest({ messages, checkpoint, blobStore, model }) {
+export function buildRunRequest({ messages, checkpoint, blobStore, model, extraSystem = "" }) {
 	let conversationState;
 	let actionText;
 	let images;
@@ -188,7 +190,7 @@ export function buildRunRequest({ messages, checkpoint, blobStore, model }) {
 		actionText = last.text;
 		images = last.images;
 	} else {
-		const cold = buildColdStart(messages);
+		const cold = buildColdStart(messages, extraSystem);
 		conversationState = cold.conversationState;
 		if (blobStore) {
 			for (const [key, value] of cold.blobStore) blobStore.set(key, value);

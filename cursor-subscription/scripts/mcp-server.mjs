@@ -509,6 +509,12 @@ const TOOLS = [
 			// model. This is the check that would have caught the original defect on
 			// the first turn instead of after a user noticed.
 			const metrics = shim.metrics();
+			// Anything the host asked for that this protocol cannot express. Naming
+			// it is the difference between "the shim is broken" and "the shim is
+			// approximating, and here is exactly where".
+			for (const note of metrics.approximations ?? []) {
+				lines.push(`  warn  ${note}`);
+			}
 			if (metrics.droppedToolCalls > 0) {
 				faults.push(
 					`${metrics.droppedToolCalls} of ${metrics.toolRequests} tool requests never reached ` +

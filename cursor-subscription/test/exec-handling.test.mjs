@@ -26,6 +26,7 @@ import {
 	encodeExecClientMessage,
 	encodeExecClientMessageEnvelope,
 } from "../lib/cursor-client.mjs";
+import { planRequestControls } from "../lib/shim.mjs";
 import { Writer, Reader, encodeValue } from "../lib/proto.mjs";
 
 /** Build an ExecServerMessage exactly as observed on the wire. */
@@ -196,4 +197,68 @@ test("every known exec carries the field its reply must be addressed to", () => 
 			`${name} must keep field ${field} or its refusal cannot be addressed`,
 		);
 	}
+});
+
+// --- request controls: what the host asks for vs what this protocol can do ----
+
+test("tool_choice=none suppresses tool registration entirely", () => {
+	// A host told "none" that still receives a tool call has been lied to, and
+	// nothing downstream can tell. Registering nothing is the honest mapping.
+	const plan = planRequestControls({ tool_choice: "none", tools: [{ function: { name: "t" } }] });
+	assert.equal(plan.suppressTools, true);
+	assert.ok(plan.notes.some((n) => n.includes("tool_choice=none honoured")));
+});
+
+test("a named tool_choice registers only that tool", () => {
+	// A named choice is a filter, not a hint: registering the rest would leave
+	// the model free to pick something the host ruled out.
+	const plan = planRequestControls({ tool_choice: { type: "function", function: { name: "get_weather" } } });
+	assert.equal(plan.suppressTools, false);
+	assert.equal(plan.only, "get_weather");
+	assert.ok(plan.notes.some((n) => n.includes("pinned to get_weather")));
+});
+
+test("tool_choice=required is declared unexpressible rather than faked", () => {
+	const plan = planRequestControls({ tool_choice: "required" });
+	assert.equal(plan.suppressTools, false, "tools stay registered");
+	assert.equal(plan.only, undefined, "but no single tool is pinned");
+	assert.ok(plan.notes.some((n) => n.includes("required is not expressible")));
+});
+
+test("parameters Cursor cannot receive are named, not silently dropped", () => {
+	const plan = planRequestControls({
+		temperature: 0.2,
+		top_p: 0.9,
+		stop: ["x"],
+		parallel_tool_calls: false,
+	});
+	for (const field of ["temperature", "top_p", "stop"]) {
+		assert.ok(plan.notes.some((n) => n.includes(field)), `${field} must be reported`);
+	}
+	assert.ok(plan.notes.some((n) => n.includes("parallel_tool_calls")));
+});
+
+test("a structured-output request becomes a system instruction", () => {
+	// Silently returning prose where JSON was asked for is the worst option;
+	// aiming the model at the schema is a best effort, and it is declared.
+	const object = planRequestControls({ response_format: { type: "json_object" } });
+	assert.match(object.extraSystem, /valid JSON object/);
+
+	const schema = planRequestControls({
+		response_format: { type: "json_schema", json_schema: { schema: { type: "object", required: ["city"] } } },
+	});
+	assert.match(schema.extraSystem, /JSON Schema/, "the schema is carried into the instruction");
+	assert.match(schema.extraSystem, /city/, "and its content with it");
+
+	const unknown = planRequestControls({ response_format: { type: "xml" } });
+	assert.ok(unknown.notes.some((n) => n.includes("response_format=xml")), "an unsupported format is reported");
+});
+
+test("a plain request is left alone", () => {
+	// The common path must add nothing: no notes, no instruction, tools intact.
+	const plan = planRequestControls({ model: "m", messages: [], tools: [{}] });
+	assert.deepEqual(plan.notes, []);
+	assert.equal(plan.extraSystem, "");
+	assert.equal(plan.suppressTools, false);
+	assert.equal(plan.only, undefined);
 });
