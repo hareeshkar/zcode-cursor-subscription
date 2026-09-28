@@ -22,9 +22,18 @@ jobs:
           node-version: ${{ matrix.node }}
 
       # No dependencies and no build step — the plugin is plain ESM on Node's
-      # standard library. The install line exists only to prove that.
-      - name: Install (no dependencies expected)
-        run: npm install --no-audit --no-fund
+      # standard library. Assert that rather than running an install, which
+      # would need a lockfile to mean anything and would fail here anyway.
+      - name: Assert the plugin declares no dependencies
+        run: |
+          node -e '
+            const pkg = require("./cursor-subscription/package.json");
+            for (const field of ["dependencies", "devDependencies", "peerDependencies"]) {
+              const n = Object.keys(pkg[field] ?? {}).length;
+              if (n) throw new Error(`expected no ${field}, found ${n}: ${Object.keys(pkg[field]).join(", ")}`);
+            }
+            console.log("no dependencies declared");
+          '
 
       - name: Verify the marketplace manifest matches the plugin
         run: |
