@@ -276,21 +276,37 @@ function decodeTokenDelta(bytes) {
 }
 
 /**
- * ConversationStateStructure.token_details.used_tokens — the authoritative
- * input-token count for the conversation Cursor is holding.
+ * The authoritative input-token count for the conversation Cursor is holding.
+ *
+ * Path: checkpoint → `token_details` (field 5) → `used_tokens` (field 1).
+ *
+ * This previously looked for `{1|2} → .8 → .1`, which never matched anything, so
+ * it always returned `undefined` and every response reported `prompt_tokens: 0`.
+ * The host derives its compaction threshold from that number, so reporting zero
+ * forever meant compaction could not fire on real usage.
+ *
+ * Resolved against a live capture rather than by argument. A checkpoint taken
+ * after a real turn carried a 286-byte field 5 decoding as:
+ *
+ *   field 1 = 10985     used tokens — a plausible count for that context
+ *   field 2 = 200000    the context window
+ *   field 3 = a per-section breakdown, with `system_prompt` visible in it
+ *
+ * field 5 is absent-to-empty on the very first minimal checkpoint and populated
+ * from the second turn onward, which is consistent with there being nothing to
+ * count yet.
  */
 export function decodeCheckpointUsedTokens(checkpoint) {
 	try {
-		const fields = readFields(checkpoint);
-		const state = fields.find((f) => f.field === 1 || f.field === 2)?.bytes;
-		if (!state) return undefined;
-		const details = readFields(state).find((f) => f.field === 8)?.bytes;
+		const details = readFields(checkpoint).find((f) => f.field === 5)?.bytes;
 		if (!details) return undefined;
 		const reader = new Reader(details);
 		while (!reader.done) {
 			const { field, wireType } = reader.tag();
 			if (wireType === 0) {
 				const value = reader.varint();
+				// Field 2 of the same message is the context window, which is large
+				// and could be mistaken for a count if the fields were not distinct.
 				if (field === 1 && value > 0) return value;
 			} else {
 				reader.skip(wireType);

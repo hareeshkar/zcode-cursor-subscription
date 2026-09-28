@@ -744,6 +744,9 @@ export class CursorShim {
 						// re-encoding ZCode history. Copy it — reader views alias the
 						// frame buffer, which is reused as the stream continues.
 						checkpoint = Uint8Array.from(frame.payload);
+						if (process.env.CURSOR_SHIM_DEBUG) {
+							this.log(`checkpoint hex=${Buffer.from(frame.payload).toString("hex")}`);
+						}
 						const used = decodeCheckpointUsedTokens(checkpoint);
 						if (used !== undefined) promptTokens = used;
 					} else if (frame.kind === "kv") {

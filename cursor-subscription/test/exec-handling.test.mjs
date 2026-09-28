@@ -30,6 +30,7 @@ import { canAnchorTurn, planRequestControls } from "../lib/shim.mjs";
 import { ConversationStore } from "../lib/conversation-store.mjs";
 import { pickProbeModels } from "../lib/selftest.mjs";
 import { Writer, Reader, encodeValue } from "../lib/proto.mjs";
+import { decodeCheckpointUsedTokens } from "../lib/cursor-client.mjs";
 
 /** Build an ExecServerMessage exactly as observed on the wire. */
 function execFrame({ id = 1, execId = "", fields = [] }) {
@@ -340,4 +341,36 @@ test("a request with no reasoning selection says nothing about reasoning", () =>
 	// The report must not cry wolf on the common path.
 	const plan = planRequestControls({ model: "m", messages: [] });
 	assert.ok(!plan.notes.some((n) => n.includes("reasoning")));
+});
+
+// --- token accounting: reported zero for the life of the project -------------
+
+/** Build a checkpoint the way the wire does: field 5 → TokenDetails.field 1. */
+function checkpointWithTokens(used, window = 200_000) {
+	const details = new Writer().varint(1, used).varint(2, window).finish();
+	return new Writer().message(5, details).finish();
+}
+
+test("used tokens are read from the path a real capture confirmed", () => {
+	// The decoder previously looked for `{1|2} → .8 → .1`, which matched nothing,
+	// so it always returned undefined and every response reported
+	// `prompt_tokens: 0`. The host derives its compaction threshold from that
+	// number, so it could not fire on real usage. Verified against a live
+	// checkpoint whose field 5 decoded as used=10985, window=200000.
+	assert.equal(decodeCheckpointUsedTokens(checkpointWithTokens(10_985)), 10_985);
+	assert.equal(decodeCheckpointUsedTokens(checkpointWithTokens(1)), 1);
+});
+
+test("the context window is never mistaken for the token count", () => {
+	// Field 2 of the same message is 200000 — far larger than any real count, and
+	// a plausible thing to return by mistake if the fields were not distinguished.
+	assert.equal(decodeCheckpointUsedTokens(checkpointWithTokens(42, 200_000)), 42);
+});
+
+test("a checkpoint with no token details reports nothing rather than zero", () => {
+	// The first, minimal checkpoint has an empty field 5. `undefined` is honest;
+	// a fabricated 0 would tell the host the context is empty.
+	assert.equal(decodeCheckpointUsedTokens(new Writer().finish()), undefined);
+	assert.equal(decodeCheckpointUsedTokens(new Writer().message(5, new Writer().finish()).finish()), undefined);
+	assert.equal(decodeCheckpointUsedTokens(undefined), undefined, "must not throw on a missing checkpoint");
 });
