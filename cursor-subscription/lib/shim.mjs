@@ -621,13 +621,14 @@ export class CursorShim {
 
 		// --- resume vs replay (see conversation-store.mjs) -------------------
 		const anchor = this.#conversations.find(messages);
-		let suffixStart = 0;
 		let conversationId;
 		if (anchor) {
 			const plan = planTurn(anchor.committed, messages);
 			if (plan.resumable) {
 				conversationId = anchor.conversationId;
-				suffixStart = messages.length - plan.suffix.length;
+				// No suffix offset is computed here: on a resume `buildRunRequest`
+				// sends only the newest user message as the action, and the checkpoint
+				// carries everything before it. An offset was computed and never read.
 				this.#stats.resumed += 1;
 			} else {
 				this.#stats.replayed += 1;
@@ -680,6 +681,14 @@ export class CursorShim {
 			checkpoint: anchor?.checkpoint,
 			blobStore,
 			model,
+			// Was computed and then dropped — the response-format instruction never
+			// reached the request, so a JSON schema request silently produced prose.
+			// `noUnusedLocals` now fails the build on an unused local like this.
+			extraSystem,
+			// Tools declared up-front as well as served on the exec reply. Cursor's
+			// own client sends them here; the exec path alone is a round-trip it
+			// does not need.
+			mcpTools: encodedTools,
 		});
 
 		const run = { toolNames, model, messages, blobStore, conversationId };

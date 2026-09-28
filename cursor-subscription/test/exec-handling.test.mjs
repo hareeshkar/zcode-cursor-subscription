@@ -374,3 +374,48 @@ test("a checkpoint with no token details reports nothing rather than zero", () =
 	assert.equal(decodeCheckpointUsedTokens(new Writer().message(5, new Writer().finish()).finish()), undefined);
 	assert.equal(decodeCheckpointUsedTokens(undefined), undefined, "must not throw on a missing checkpoint");
 });
+
+test("a tool definition carries its schema as both a Value and a JSON string", () => {
+	// Cursor's own client declares `3 input_schema` (a google.protobuf.Value) and
+	// `6 input_schema_json` (a string). It is undocumented which one it reads, and
+	// a schema that is delivered but not understood is invisible — so both go out.
+	const schema = { type: "object", properties: { path: { type: "string" } }, required: ["path"] };
+	const bytes = encodeMcpToolDefinition({ name: "read_file", description: "Read a file.", inputSchema: schema });
+
+	// Read every length-delimited field, including field 3, whose bytes are a
+	// nested Value rather than text.
+	const texts = [];
+	const reader = new Reader(bytes);
+	while (!reader.done) {
+		const { field, wireType } = reader.tag();
+		if (wireType !== 2) {
+			reader.skip(wireType);
+			continue;
+		}
+		const raw = reader.bytes();
+		if (field === 3) continue; // the Value encoding, asserted elsewhere
+		texts.push([field, new TextDecoder().decode(raw)]);
+	}
+	const byField = Object.fromEntries(texts);
+	assert.equal(byField[1], "read_file");
+	assert.equal(byField[2], "Read a file.");
+	assert.equal(byField[4], "zcode-cursor-subscription");
+	assert.equal(byField[5], "read_file");
+	assert.deepEqual(JSON.parse(byField[6]), schema, "field 6 is the schema as JSON text");
+});
+
+test("an absent schema still encodes as a valid empty object, not a broken one", () => {
+	const bytes = encodeMcpToolDefinition({ name: "t" });
+	const reader = new Reader(bytes);
+	let sawJson = false;
+	while (!reader.done) {
+		const { field, wireType } = reader.tag();
+		if (wireType !== 2) { reader.skip(wireType); continue; }
+		const raw = reader.bytes();
+		if (field === 6) {
+			assert.deepEqual(JSON.parse(new TextDecoder().decode(raw)), { type: "object", properties: {} });
+			sawJson = true;
+		}
+	}
+	assert.ok(sawJson, "field 6 must always be present");
+});

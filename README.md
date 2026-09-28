@@ -305,6 +305,7 @@ approximated, and `cursor_status` shows the counters.
 
 | Document | What it covers |
 |---|---|
+| [`docs/CURSOR-PROTOCOL-SCHEMA.md`](docs/CURSOR-PROTOCOL-SCHEMA.md) | **Ground truth.** Cursor's message schemas, extracted from Cursor's own client bundle. Check here first when a field number is in doubt |
 | [`docs/CONCEPTS-AND-CONTRACTS.md`](docs/CONCEPTS-AND-CONTRACTS.md) | **Start here.** What a conversation, a resume and a token actually are; Cursor's full field map; what ZCode sends and what happens to it — system prompt composition, steering, compaction, tool results, the streaming contract, cancellation |
 | [`docs/HARNESS-AUDIT.md`](docs/HARNESS-AUDIT.md) | The four defects found, the research behind the fixes, and what remains open |
 | [`docs/ZCODE-PROVIDER-MAPPING.md`](docs/ZCODE-PROVIDER-MAPPING.md) | How ZCode natively resolves a provider: the closed API enum, the strict config schema, the rule chain, `optionSpecs`, and the absence of model discovery |

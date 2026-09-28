@@ -179,7 +179,7 @@ export function buildColdStart(messages, extraSystem = "") {
  * @param {string} input.model     the Cursor model id.
  * @returns {Uint8Array} an `AgentClientMessage`.
  */
-export function buildRunRequest({ messages, checkpoint, blobStore, model, extraSystem = "" }) {
+export function buildRunRequest({ messages, checkpoint, blobStore, model, extraSystem = "", mcpTools = [] }) {
 	let conversationState;
 	let actionText;
 	let images;
@@ -208,5 +208,10 @@ export function buildRunRequest({ messages, checkpoint, blobStore, model, extraS
 		modelDetails: encodeModelDetails(model),
 		// A fresh id every time: the checkpoint, not the id, is the anchor.
 		conversationId: randomUUID(),
+		mcpTools,
+		// Declared only when images are actually attached. The flag tells the server
+		// this client can handle inline images; setting it unconditionally would
+		// claim a capability the request is not exercising.
+		clientSupportsInlineImages: images.length > 0,
 	});
 }

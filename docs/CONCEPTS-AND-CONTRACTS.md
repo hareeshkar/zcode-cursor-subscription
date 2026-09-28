@@ -95,7 +95,11 @@ count would make the host compact at the wrong time.
 
 ## Part 2 — Cursor's protocol, below the plugin
 
-Undocumented, reverse-engineered, and known to change without notice. Field
+Undocumented, reverse-engineered, and known to change without notice.
+
+**The authoritative field maps are in [`CURSOR-PROTOCOL-SCHEMA.md`](./CURSOR-PROTOCOL-SCHEMA.md)**,
+extracted from Cursor's own client bundle. This part is the guided tour; that file
+is the reference. Field
 numbers are the fragile part: a wrong number is worse than a missing feature,
 because the message is accepted and silently does nothing.
 
@@ -321,7 +325,8 @@ Recorded so nobody has to rediscover it.
 
 | Item | State |
 |---|---|
-| Image delivery | Encoded correctly, not received by the model. Two untested hypotheses above |
+| Image delivery | Encoded correctly against Cursor's own schema, still not received. `client_supports_inline_images` is now set; the untested route that remains is the structured history family |
+| Structured history | The protocol has typed user/assistant/tool messages, tool calls and reasoning. We replay as a text transcript. Largest known fidelity gap — see the schema doc |
 | Typed exec rejections | Generic refusal works; per-tool reasons would let the model distinguish failures |
 | Parallel tool calls | Unverified; the run ends at the first call |
 | Inter-chunk stall watchdog | Not built. A first-token timeout does not bound a long-lived HTTP/2 stream |

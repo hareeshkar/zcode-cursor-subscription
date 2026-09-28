@@ -32,6 +32,10 @@
     "noImplicitAny": false,
 
     "noImplicitOverride": true,
+    // An unused local was a real defect here: `extraSystem` was computed and
+    // then never passed, so a JSON-schema request silently produced prose. The
+    // compiler sees that; a test did not.
+    "noUnusedLocals": true,
     "useUnknownInCatchVariables": true,
 
     "skipLibCheck": true,

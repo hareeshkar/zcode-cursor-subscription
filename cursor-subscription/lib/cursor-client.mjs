@@ -65,12 +65,12 @@ function encodeAssistantMessage(text) {
 }
 
 /** ConversationStep { assistant_message = 1 } */
-function encodeAssistantStep(text) {
+export function encodeAssistantStep(text) {
 	return new Writer().message(1, encodeAssistantMessage(text)).finish();
 }
 
 /** AgentConversationTurnStructure { user_message = 1, steps = 2 } */
-function encodeAgentTurn(userBytes, stepBytes) {
+export function encodeAgentTurn(userBytes, stepBytes) {
 	const writer = new Writer();
 	if (userBytes.length > 0) writer.bytes(1, userBytes);
 	for (const step of stepBytes) writer.bytes(2, step);
@@ -78,7 +78,7 @@ function encodeAgentTurn(userBytes, stepBytes) {
 }
 
 /** ConversationTurnStructure { agent_conversation_turn = 1 } */
-function encodeTurnStructure(turnBytes) {
+export function encodeTurnStructure(turnBytes) {
 	return new Writer().message(1, turnBytes).finish();
 }
 
@@ -127,15 +127,49 @@ export function encodeConversationState({ rootPromptBlobIds = [], turns = [] }) 
 	return writer.finish();
 }
 
-/** AgentRunRequest { conversation_state = 1, action = 2, model_details = 3, conversation_id = 5 } */
-export function encodeRunRequest({ conversationState, action, modelDetails, conversationId }) {
+/**
+ * AgentRunRequest — schema taken from Cursor's own client bundle:
+ *
+ *   AgentRunRequest|1 conversation_state|2 action|3 model_details|9 requested_model
+ *     |4 mcp_tools #4|5 conversation_id|6 mcp_file_system_options|7 skill_options
+ *     |8 custom_system_prompt|...|19 client_supports_inline_images 8?|...
+ *
+ * Three of those fields matter and were previously unsent:
+ *
+ *   4  mcp_tools                      tools declared up-front, natively
+ *   19 client_supports_inline_images  a capability flag; without it the server has
+ *                                     no reason to surface an image to the model,
+ *                                     which is the best explanation found for why
+ *                                     correctly-encoded images were never seen
+ *
+ * The tools are still also served on the exec reply, because that path is proven
+ * and the server may take either. Declaring them up-front costs nothing and
+ * removes a round-trip.
+ */
+export function encodeRunRequest({
+	conversationState,
+	action,
+	modelDetails,
+	conversationId,
+	mcpTools,
+	clientSupportsInlineImages = false,
+}) {
 	const writer = new Writer();
 	writer.message(1, conversationState);
 	writer.message(2, action);
 	writer.message(3, modelDetails);
+	if (mcpTools && mcpTools.length > 0) writer.message(4, encodeMcpTools(mcpTools));
 	// conversation_id is the server-native resumption anchor. Its presence is
 	// the entire difference between an O(new) and an O(history) turn.
 	if (conversationId) writer.string(5, conversationId);
+	if (clientSupportsInlineImages) writer.varint(19, 1);
+	return writer.finish();
+}
+
+/** McpTools { mcp_tools = 1 (repeated) } */
+export function encodeMcpTools(tools) {
+	const writer = new Writer();
+	for (const tool of tools) writer.message(1, tool);
 	return writer.finish();
 }
 
@@ -161,14 +195,28 @@ export function encodeExecClientMessageEnvelope(execBytes) {
 	return new Writer().message(2, execBytes).finish();
 }
 
-/** McpToolDefinition { name=1, description=2, input_schema=3, provider_identifier=4, tool_name=5 } */
+/**
+ * McpToolDefinition — schema confirmed against Cursor's own client bundle:
+ *
+ *   McpToolDefinition|1 name 9|4 provider_identifier 9|5 tool_name 9|2 description 9
+ *                    |3 input_schema #0|6 input_schema_json 9?|7 output_schema_json 9?
+ *                    |8 annotations_json 9?
+ *
+ * Field 3 is a `google.protobuf.Value` and field 6 is the same schema as a JSON
+ * *string*. This sends both: Cursor's own client is the authority on which it
+ * reads, it is not documented, and a tool whose schema is delivered but not
+ * understood is invisible — the exact failure mode that made tool calling look
+ * like it worked while doing nothing.
+ */
 export function encodeMcpToolDefinition({ name, description, inputSchema, providerIdentifier, toolName }) {
+	const schema = inputSchema ?? { type: "object", properties: {} };
 	const writer = new Writer();
 	writer.string(1, name);
 	writer.string(2, description ?? "");
-	writer.bytes(3, bytesOf(encodeValue(inputSchema ?? { type: "object", properties: {} })));
+	writer.bytes(3, bytesOf(encodeValue(schema)));
 	writer.string(4, providerIdentifier ?? "zcode-cursor-subscription");
 	writer.string(5, toolName ?? name);
+	writer.string(6, JSON.stringify(schema));
 	return writer.finish();
 }
 
@@ -580,7 +628,11 @@ export class AgentRun {
 	#ended = false;
 	#closed = false;
 
-	constructor(accessToken, { signal, idleTimeoutMs = STREAM_IDLE_TIMEOUT_MS } = {}) {
+	constructor(
+		accessToken,
+		{ signal, idleTimeoutMs = STREAM_IDLE_TIMEOUT_MS, progressTimeoutMs = STREAM_PROGRESS_TIMEOUT_MS } = {},
+	) {
+		this.progressTimeoutMs = progressTimeoutMs;
 		this.signal = signal;
 		this.idleTimeoutMs = idleTimeoutMs;
 		this.accessToken = accessToken;
@@ -737,6 +789,16 @@ export class AgentRun {
 			if (this.signal?.aborted) return;
 			if (Date.now() - this.#lastActivity > this.idleTimeoutMs) {
 				throw new CursorError("Cursor stopped responding", "CURSOR_IDLE_TIMEOUT");
+			}
+			// A distinct failure from the one above, and worth distinguishing: the
+			// socket can be perfectly alive while no complete frame arrives, because
+			// a frame is still being assembled. `#lastContent` and this timeout were
+			// both declared and neither was read — the watchdog was half-built.
+			if (Date.now() - this.#lastContent > this.progressTimeoutMs) {
+				throw new CursorError(
+					`Cursor sent no complete frame for ${Math.round(this.progressTimeoutMs / 1000)}s`,
+					"CURSOR_PROGRESS_TIMEOUT",
+				);
 			}
 			const frame = await this.#reader.next({ timeoutMs: 250 });
 			if (frame === TIMED_OUT) continue;
