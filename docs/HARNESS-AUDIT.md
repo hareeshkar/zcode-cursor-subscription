@@ -95,6 +95,36 @@ refusal path safe turned it into a silent one.
 
 ---
 
+### The fourth defect: usage reported zero, forever
+
+Every response carried `prompt_tokens: 0`. The decoder responsible looked for
+`checkpoint.{1|2} → .8 → .1`, a path that matches nothing. The reference
+implementation said `checkpoint.5 → .1`. One of the two was wrong, both fail
+silently, and neither could be settled by argument.
+
+Settled by capturing a real checkpoint and decoding it. Field 5 is empty on the
+first minimal checkpoint and 286 bytes from the second turn on:
+
+```
+TokenDetails.field 1 = 10985     used tokens
+TokenDetails.field 2 = 200000    the context window
+TokenDetails.field 3             a per-section breakdown, `system_prompt` in it
+```
+
+The reference was right. The decoder now returns a real number — 10,851 on a
+first turn, 10,952 on a resumed second.
+
+The consequence was not just a wrong display value. The host derives its
+compaction threshold from prompt tokens, so a permanent zero meant compaction
+could not fire on real usage: context grew until something else broke.
+
+**The pattern, now four times over:** the code encoded correctly, the feature did
+nothing, and no error appeared anywhere. A wrong field path, a wrong sentinel, a
+missing field number, a misclassified exec — four different mechanisms, one
+symptom. That is what the type-checker and the counters exist to catch.
+
+---
+
 ## 2. Proven
 
 | Claim | Evidence |
@@ -108,6 +138,8 @@ refusal path safe turned it into a silent one.
 | Tool calls survive streaming | 18 SSE frames, all with `choices`; `finish_reason: "tool_calls"` on a populated frame |
 | A tool result is never dropped on a resumed turn | the interlock refuses to resume; the replay carries it as `[TOOL RESULT]` |
 | Cursor's own built-in execs are answered, not ignored | every known case carries its field; `read_file` returns in 7 s instead of hanging |
+| Usage carries Cursor's real token count | 10,851 first turn, 10,952 resumed — was 0 forever |
+| Every turn anchors, and a resume engages | `conversations: 1` then `resumed: 1, resumeRate: 0.5` |
 | No malformed input wedges the shim | 12 malformed requests, then a real completion still answers `PONG` |
 | Client errors are 4xx, not 5xx | bad JSON → `400 bad_json`; missing messages → `400 no_messages` |
 | A refusal loop cannot hang | bounded by `MAX_EXECS_PER_RUN` / `MAX_REFUSALS_PER_FIELD` |

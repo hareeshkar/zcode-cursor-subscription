@@ -259,7 +259,8 @@ ZCode provider was a port, not a copy — and most of the work is the part that 
 | **Diagnostics** | `cursor_doctor` compares session, shim and provider entry and names the disagreement — probing the socket rather than trusting a startup decision |
 | **Clean uninstall** | A teardown that removes the credential, the provider, the model rules, the install record, the cache and the data dir, and verifies nothing survived |
 | **Review** | An adversarial review pass ([`docs/REVIEW-REPORT.md`](docs/REVIEW-REPORT.md)) that found nine critical defects, ten independently reproduced |
-| **Tests** | 73 unit tests plus live probes that spend a real request: a full tool round trip, agent behaviour across turns (tool choice, mid-session steering, system-prompt retention), and a malformed-input matrix. The live probes are gated behind `CURSOR_LIVE_TESTS=1` and never run in CI |
+| **Type safety** | The shipped code is type-checked under `strict` with `--noEmit` — no build step, no runtime dependency. CI fails on the null-safety family, which caused three separate defects here; the remaining diagnostics are reported as a burn-down rather than claimed clean |
+| **Tests** | 99 unit tests plus live probes that spend a real request: a full tool round trip, agent behaviour across turns (tool choice, mid-session steering, system-prompt retention), and a malformed-input matrix. The live probes are gated behind `CURSOR_LIVE_TESTS=1` and never run in CI |
 | **Error taxonomy** | A caller's mistake is a 4xx (`bad_json`, `no_messages`); a shim fault is a 5xx. A client error reported as a server fault sends the host hunting a bug that does not exist |
 | **Loop safety** | Refusing an exec and continuing is a loop unless bounded, so a run is capped at 24 execs and 6 refusals of one field, and is then ended and logged rather than left hanging |
 
@@ -268,18 +269,37 @@ per-file in [`NOTICE.md`](cursor-subscription/NOTICE.md).
 
 ### Known limits, stated plainly
 
-This ships as usable, not finished. Two things are measured rather than assumed:
+This ships as usable, not finished. What is measured, and what is not.
 
-- **Server-side conversation reuse has never actually engaged.** Across every real turn run against a
-  live account, Cursor sent no resume checkpoint, so `cursor_status` reports a resume rate of 0 and
-  every turn is a full replay. The interlock that decides is tested and correct; the other side of it
-  has not been seen arrive. Do not promise a token saving.
-- **Tool calls now work, and are verified live.** They did not work at all until 0.4.0 — see
-  [`docs/HARNESS-AUDIT.md`](docs/HARNESS-AUDIT.md) for the defect. A model emitting a call, the host
-  running it, and the model using the result are now proven on Composer, Grok, GPT and Claude.
+**Working and verified live:**
 
-Neither is a claim of success. Both are reported by the tooling rather than hidden, and both would show
-up immediately in `cursor_status` if they changed.
+- **Tool calls**, end to end: a model emits a call, the host runs it, the model uses the result — proven
+  on Composer, Grok, GPT and Claude, streaming and non-streaming.
+- **Server-side conversation reuse.** `cursor_status` reports a real resume rate, and a second turn that
+  is an exact extension genuinely resumes. This was believed impossible for most of the project's life
+  and was in fact our bug — see the audit.
+- **Token accounting.** Usage carries Cursor's own prompt-token count (10,851 on a first turn, 10,952 on
+  a resumed second). It reported zero forever before that, which meant the host's compaction threshold
+  had nothing real to work from.
+
+**Not working, and stated as such:**
+
+- **Image input.** The shim encodes images exactly as the reference implementation does — payload and
+  field-7 tag provably present — but across five models and two kinds of image (synthetic and a real
+  screenshot) the model reports receiving none, and then goes hunting with built-in tools. Models are
+  advertised as `supportsImage: false` because that was *tested*, not assumed. A side effect worth
+  having: the host substitutes placeholder text, so the user gets a clear signal instead of a model that
+  flails and stalls.
+- **Reasoning level.** Effort is carried in Cursor's model id, not the request — the account exposes
+  `-low`/`-high`/`-thinking` variants as distinct models. A selection made in the reasoning picker
+  therefore cannot be transmitted, and is reported as an approximation rather than ignored.
+- **Parallel tool calls in one turn** are unverified; the run ends at the first call.
+- **Refusals are generic.** Cursor's own filesystem and shell tools are declined with one generic error
+  rather than a typed, per-tool reason, so the model cannot distinguish "permission denied" from
+  "unsupported".
+
+Every one of these is reported by the tooling rather than hidden — `cursor_doctor` lists what a session
+approximated, and `cursor_status` shows the counters.
 
 ## Repository layout
 
