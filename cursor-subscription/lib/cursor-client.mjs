@@ -584,11 +584,6 @@ export function decodeAvailableModel(bytes) {
 	return model.name ? model : undefined;
 }
 
-/** Kept for callers that only need the id. */
-function decodeModelId(bytes) {
-	return decodeAvailableModel(bytes)?.name;
-}
-
 /**
  * Split one `AgentServerMessage` payload into its constituent messages.
  *
