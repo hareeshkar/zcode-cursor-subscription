@@ -146,6 +146,11 @@ export class CursorShim {
 	#adoptedPort = null;
 	#adoptionTimer;
 	#stats = { turns: 0, resumed: 0, replayed: 0, toolCalls: 0, toolRequests: 0, droppedToolCalls: 0 };
+	// Liveness. There is no model-status endpoint in Cursor's protocol, so the
+	// only honest answer to "is the model stuck?" is when the last frame arrived
+	// and what we last did with it. Frames still arriving means the model is
+	// working; silence right after an unanswered exec means it is waiting on us.
+	#liveness = { frames: 0, lastFrameAt: 0, lastAction: "none" };
 
 	constructor(options = {}) {
 		this.#store = options.store ?? new CredentialStore();
@@ -183,17 +188,30 @@ export class CursorShim {
 	}
 
 	/** Aggregate counters, exposed through the management tool. */
+	/**
+	 * Everything the management surface reports.
+	 *
+	 * `frames`, `lastFrameAt` and `lastAction` are the honest answer to "is the
+	 * model stuck?". There is no model-status endpoint in Cursor's protocol, so
+	 * the only evidence is whether frames are still arriving and what was last
+	 * done with them: traffic means the model is working, silence right after
+	 * an exec we did not answer means it is waiting on us.
+	 */
 	metrics() {
 		return {
 			...this.#stats,
 			resumeRate:
 				this.#stats.turns === 0 ? 0 : Number((this.#stats.resumed / this.#stats.turns).toFixed(3)),
 			conversations: this.#conversations.size,
+			frames: this.#liveness.frames,
+			lastFrameAt: this.#liveness.lastFrameAt,
+			lastAction: this.#liveness.lastAction,
 		};
 	}
 
 	resetMetrics() {
 		this.#stats = { turns: 0, resumed: 0, replayed: 0, toolCalls: 0, toolRequests: 0, droppedToolCalls: 0 };
+		this.#liveness = { frames: 0, lastFrameAt: 0, lastAction: "none" };
 		this.#conversations.clear();
 	}
 
@@ -575,6 +593,8 @@ export class CursorShim {
 		try {
 			for await (const payload of run.frames()) {
 				for (const frame of splitServerMessage(payload)) {
+					this.#liveness.frames += 1;
+					this.#liveness.lastFrameAt = Date.now();
 					if (process.env.CURSOR_SHIM_DEBUG) {
 						this.log(`frame kind=${frame.kind} bytes=${frame.payload?.length ?? 0}`);
 					}
@@ -624,6 +644,7 @@ export class CursorShim {
 						if (process.env.CURSOR_SHIM_DEBUG) {
 							this.log(`exec case=${exec.case} field=${exec.field} id=${exec.id} tools=${tools.length}`);
 						}
+						this.#liveness.lastAction = `exec:${exec.case}#${exec.field ?? "?"}`;
 						if (exec.case === "requestContextArgs") {
 							// Cursor asks for the tool schemas as an exec. Answering on
 							// the stream is the only shape the server accepts; a bare

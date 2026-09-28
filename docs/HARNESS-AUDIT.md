@@ -303,6 +303,24 @@ invariant, and now has tests.
 compaction specifically. Treat the mitigation as engineering practice, not
 measured result.
 
+### 4.9 "Is the model stuck?" has to be answered from evidence
+
+There is no model-status endpoint in Cursor's protocol, so the only honest
+answer is when the last frame arrived and what was last done with it. `/health`
+now reports `frames`, `lastFrameAt` and `lastAction`.
+
+This exists because the second defect was diagnosed by reading a debug log by
+hand. The trace showed frames arriving, then an exec, then silence — which is
+the model *waiting for a reply we never sent*, not the model stuck. That
+distinction should not require an expert squinting at a log: frames still
+arriving means the model is working; silence immediately after an exec we did
+not answer means it is blocked on us.
+
+The generalisable point, and the one that matters beyond this project: **an
+agent narrating an action is not the same as an agent performing it.** A model
+that says it will run `git status` has told you nothing. The evidence is a tool
+call in the trace, or a counter that moved.
+
 ### 4.8 A first-chunk timeout does not cover a mid-stream stall
 
 LiteLLM notes `stream_timeout` bounds only the first chunk
