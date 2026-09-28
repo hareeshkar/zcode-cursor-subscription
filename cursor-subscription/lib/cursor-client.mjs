@@ -692,6 +692,21 @@ export function decodeAvailableModel(bytes) {
  * 1 interaction update, 2 exec request, 3 conversation checkpoint, 4 KV blob.
  * Field 3 is the resumption anchor — see docs/RESEARCH-FINDINGS.md 6.9.
  */
+/**
+ * Split a Connect frame into its messages.
+ *
+ * The arms are declared by Cursor's own client:
+ *
+ *   AgentServerMessage|1 interaction_update #0|2 exec_server_message #1
+ *     |5 exec_server_control_message #2|3 conversation_checkpoint_update #3
+ *     |4 kv_server_message #4|7 interaction_query #5|8 ttft_breakdown #6
+ *
+ * Only 1-4 were decoded, and the rest were dropped without a trace — no frame
+ * object, no debug line, no counter. That matters beyond tidiness: a run that
+ * stalls cannot be diagnosed if a third of the wire is invisible, and a stall was
+ * indeed diagnosed here while this was true. Unrecognised arms are now returned as
+ * `unknown` so they can be counted and seen.
+ */
 export function splitServerMessage(payload) {
 	const out = [];
 	let reader;
@@ -712,6 +727,7 @@ export function splitServerMessage(payload) {
 			else if (field === 2) out.push({ kind: "exec", payload: inner });
 			else if (field === 3) out.push({ kind: "checkpoint", payload: inner });
 			else if (field === 4) out.push({ kind: "kv", payload: inner });
+			else out.push({ kind: "unknown", field, payload: inner });
 		}
 	} catch {
 		// Partial frames still yield whatever was decoded.

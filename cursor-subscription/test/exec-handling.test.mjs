@@ -37,6 +37,7 @@ import {
 	encodeHistoryTool,
 	modelIds,
 	sortModelsByName,
+	splitServerMessage,
 } from "../lib/cursor-client.mjs";
 import { buildStructuredHistory } from "../lib/conversation.mjs";
 
@@ -547,4 +548,45 @@ test("an assistant turn with no text and no calls is skipped, not encoded empty"
 		{ role: "user", content: "again" },
 	]);
 	assert.equal(history.length, 1, "only the first user turn is worth sending");
+});
+
+// --- the instrument must see the whole wire --------------------------------
+
+test("a server arm we do not decode is surfaced, not dropped", () => {
+	// AgentServerMessage declares 1,2,3,4,5,7,8. Only 1-4 were decoded and the
+	// rest vanished — no frame object, no log line, no counter. A stall was
+	// diagnosed with this true, which makes the diagnosis worthless.
+	const payload = new Writer().message(5, new Writer().string(1, "control").finish()).finish();
+	const frames = splitServerMessage(payload);
+	assert.equal(frames.length, 1, "the arm must appear");
+	assert.equal(frames[0].kind, "unknown");
+	assert.equal(frames[0].field, 5, "with the field number that identifies it");
+});
+
+test("every declared arm round-trips through the splitter", () => {
+	// 5, 7 and 8 are real arms in Cursor's own schema; 1-4 are the ones we act on.
+	const arms = [
+		[1, "interaction"],
+		[2, "exec"],
+		[3, "checkpoint"],
+		[4, "kv"],
+		[5, "unknown"],
+		[7, "unknown"],
+		[8, "unknown"],
+	];
+	for (const [field, kind] of arms) {
+		const payload = new Writer().message(field, new Writer().varint(1, 1).finish()).finish();
+		const frames = splitServerMessage(payload);
+		assert.equal(frames.length, 1, `arm ${field} must produce a frame`);
+		assert.equal(frames[0].kind, kind, `arm ${field} maps to ${kind}`);
+	}
+});
+
+test("an undecoded arm is counted and reported, so silence is never mistaken for health", async () => {
+	const { CursorShim } = await import("../lib/shim.mjs");
+	const shim = new CursorShim({ apiKey: "k" });
+	const metrics = shim.metrics();
+	assert.deepEqual(metrics.unknownFrames, {}, "starts empty");
+	assert.deepEqual(metrics.unanswered, {}, "starts empty");
+	await shim.close();
 });

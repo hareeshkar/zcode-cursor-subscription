@@ -17,7 +17,7 @@
 
 import { randomBytes } from "node:crypto";
 
-import { DEFAULT_SHIM_PORT, SHIM_HOST, dataDir } from "../lib/config.mjs";
+import { CURSOR_CLIENT_VERSION, DEFAULT_SHIM_PORT, SHIM_HOST, dataDir } from "../lib/config.mjs";
 import { CredentialStore } from "../lib/credentials.mjs";
 import { CursorAuthService } from "../lib/auth.mjs";
 import { CursorShim } from "../lib/shim.mjs";
@@ -76,10 +76,15 @@ if (shim.movedPort) {
 			`${shim.port}. Use the base URL below, not the one you asked for.\n`,
 	);
 }
+const config = shim.configuration();
 process.stderr.write(
 	`cursor-subscription: shim listening on http://${shim.host}:${shim.port}/v1\n` +
 		`cursor-subscription: credentials at ${dataDir()}\n` +
-		`cursor-subscription: ${status.authenticated ? "signed in" : "not signed in — run cursor_login"}\n`,
+		`cursor-subscription: ${status.authenticated ? "signed in" : "not signed in — run cursor_login"}\n` +
+		// Printed because a live run's behaviour is uninterpretable without knowing
+		// which path it took.
+		`cursor-subscription: history=${config.structuredHistory ? "structured" : "text-transcript"} ` +
+		`client=${CURSOR_CLIENT_VERSION}\n`,
 );
 
 for (const signal of ["SIGINT", "SIGTERM"]) {

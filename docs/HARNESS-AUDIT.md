@@ -200,6 +200,53 @@ next thing to try, and it needs captures rather than guesses.
 
 ---
 
+### The instrument was blind, so the stall diagnosis was worthless
+
+A workflow was run to settle why structured history stalls: seven shapes measured in
+parallel, Cursor's own client read, an advisor and a critic in separate contexts, and
+an unrelated model reading the same evidence cold. It found a problem with the
+*measurement*, not the protocol.
+
+All seven shapes replied, HTTP 200, in 4.0–6.5 s. **Nothing stalled.** The premise the
+run was built to investigate did not reproduce, and the case meant to test it did not
+test what it claimed: the script described `CURSOR_STRUCTURED_HISTORY=1` as moving
+history into `ConversationState`, while the shipped code writes
+`UserMessageAction` field 7 and leaves `turns` empty.
+
+Then the real finding. `splitServerMessage` decoded four arms and dropped the rest:
+
+```
+AgentServerMessage|1 interaction_update|2 exec_server_message|5 exec_server_control_message
+  |3 conversation_checkpoint_update|4 kv_server_message|7 interaction_query|8 ttft_breakdown
+```
+
+Arms 5, 7 and 8 produced **no frame object, no log line and no counter**.
+`describeServerFrame` had been written for exactly this and had **zero call sites** —
+dead code since it was added. And the `frames` / `lastFrameAt` values that
+`cursor_doctor` reports as "is the model stuck?" were counted only for split frames.
+
+**Confirmed live, immediately:** a plain `Say OK` request returns
+`unknownFrames: {"8": 1}`. Arm 8 arrives on every run and had never been seen.
+
+So the conclusion drawn earlier — "the server stalls when structured history is sent" —
+was measured with an instrument that could not see a third of the wire. It is withdrawn.
+Three other silent-but-fatal paths were found alongside it, all now counted and logged:
+
+| Path | Why it stalls |
+|---|---|
+| An exec with no numeric field | the refusal is gated on `typeof exec.field === "number"`, so nothing is sent — and Cursor waits for every exec |
+| A KV arm that is neither `get_blob_args` nor `set_blob_args` | no branch, so no reply |
+| A `getBlobArgs` for a blob we never published | answered with an empty blob; the miss was silent |
+
+The effective mode is now printed at startup, because a recorded stall cannot be
+attributed to a path without it.
+
+**The undecoded arms are counted, not fixed.** Whether arm 8 needs a reply is unknown;
+what is known is that its absence from every previous diagnosis was an assumption nobody
+had checked.
+
+---
+
 ## 2. Proven
 
 | Claim | Evidence |

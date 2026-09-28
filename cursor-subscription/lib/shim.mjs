@@ -255,6 +255,10 @@ export class CursorShim {
 	// and what we last did with it. Frames still arriving means the model is
 	// working; silence right after an unanswered exec means it is waiting on us.
 	#liveness = { frames: 0, lastFrameAt: 0, lastAction: "none" };
+	/** Inbound arms we do not decode, by field number. Silence here is not health. */
+	#unknownFrames = new Map();
+	/** Server frames that got neither a reply nor a log. */
+	#unanswered = new Map();
 	/** Host requests the shim cannot express, surfaced rather than swallowed. */
 	#approximations = new Map();
 
@@ -293,6 +297,22 @@ export class CursorShim {
 		return this.#apiKey;
 	}
 
+	/**
+	 * The configuration this process is actually running under.
+	 *
+	 * The email of a live test is unanswerable without it: a mode that is read but
+	 * never printed makes "which path did this run take" a guess, and a recorded
+	 * stall could not be attributed to a mode at all.
+	 */
+	configuration() {
+		return {
+			port: this.port,
+			host: this.host,
+			preferredPort: this.#preferredPort,
+			structuredHistory: STRUCTURED_HISTORY,
+		};
+	}
+
 	/** Aggregate counters, exposed through the management tool. */
 	/**
 	 * Everything the management surface reports.
@@ -312,6 +332,10 @@ export class CursorShim {
 			// The keys, not the counts: the Map is message → times-seen, and a bare
 			// count would say nothing about what was approximated.
 			approximations: [...this.#approximations.keys()],
+			// Undecoded inbound arms and frames we never answered. A stall cannot be
+			// diagnosed while a third of the wire is invisible.
+			unknownFrames: Object.fromEntries(this.#unknownFrames),
+			unanswered: Object.fromEntries(this.#unanswered),
 			frames: this.#liveness.frames,
 			lastFrameAt: this.#liveness.lastFrameAt,
 			lastAction: this.#liveness.lastAction,
@@ -332,6 +356,8 @@ export class CursorShim {
 	resetMetrics() {
 		this.#stats = { turns: 0, resumed: 0, replayed: 0, toolCalls: 0, toolRequests: 0, droppedToolCalls: 0 };
 		this.#liveness = { frames: 0, lastFrameAt: 0, lastAction: "none" };
+		this.#unknownFrames.clear();
+		this.#unanswered.clear();
 		this.#approximations.clear();
 		this.#conversations.clear();
 	}
@@ -754,8 +780,12 @@ export class CursorShim {
 				for (const frame of splitServerMessage(payload)) {
 					this.#liveness.frames += 1;
 					this.#liveness.lastFrameAt = Date.now();
+					if (frame.kind === "unknown") {
+						this.#note(`inbound frame arm ${frame.field} is not decoded`);
+						this.#unknownFrames.set(frame.field, (this.#unknownFrames.get(frame.field) ?? 0) + 1);
+					}
 					if (process.env.CURSOR_SHIM_DEBUG) {
-						this.log(`frame kind=${frame.kind} bytes=${frame.payload?.length ?? 0}`);
+						this.log(`frame kind=${frame.kind}${frame.field === undefined ? "" : ` arm=${frame.field}`} bytes=${frame.payload?.length ?? 0}`);
 					}
 					if (frame.kind === "interaction") {
 						const update = decodeInteractionUpdate(frame.payload);
@@ -798,8 +828,17 @@ export class CursorShim {
 						const kv = decodeKvServerMessage(frame.payload);
 						if (kv.case === "getBlobArgs") {
 							const key = Buffer.from(kv.blobId ?? new Uint8Array(0)).toString("hex");
+							const blob = blobStore?.get(key);
+							if (blob === undefined) {
+								// Answered with an empty blob, which is what the handshake
+								// requires — but a miss means Cursor asked for something we
+								// never published, and that was silent.
+								const miss = `blob:${key.slice(0, 12)}`;
+								this.#unanswered.set(miss, (this.#unanswered.get(miss) ?? 0) + 1);
+								this.log("served an unknown blob as empty", miss);
+							}
 							run.writeMessage(
-								encodeKvClientMessage(encodeGetBlobResult(kv.id, blobStore?.get(key))),
+								encodeKvClientMessage(encodeGetBlobResult(kv.id, blob)),
 							);
 						} else if (kv.case === "setBlobArgs") {
 							if (kv.blobId !== undefined && kv.blobData !== undefined) {
@@ -808,6 +847,12 @@ export class CursorShim {
 							}
 							// Acknowledge, or the run waits on the handshake forever.
 							run.writeMessage(encodeKvClientMessage(encodeSetBlobResult(kv.id)));
+						} else {
+							// Neither arm we know. Silence here is a stall, and it was
+							// previously indistinguishable from an idle run.
+							const key = `kv:${kv.case}`;
+							this.#unanswered.set(key, (this.#unanswered.get(key) ?? 0) + 1);
+							this.log("kv frame left unanswered", key);
 						}
 					} else if (frame.kind === "exec") {
 						const exec = decodeExecServerMessage(frame.payload);
@@ -854,6 +899,13 @@ export class CursorShim {
 						if (typeof exec.field === "number") {
 							refusals[exec.field] = (refusals[exec.field] ?? 0) + 1;
 							run.rejectExec(exec.id, exec.execId, exec.field, TOOL_REJECT_REASON);
+						} else {
+							// No slot to reply into, so nothing is sent. Cursor waits for
+							// every exec to be answered, which makes this a stall, not a
+							// no-op — and it was previously invisible.
+							const key = `exec:${exec.case}`;
+							this.#unanswered.set(key, (this.#unanswered.get(key) ?? 0) + 1);
+							this.log("exec with no reply slot left unanswered", key);
 						}
 						continue;
 					}
