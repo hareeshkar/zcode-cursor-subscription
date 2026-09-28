@@ -125,6 +125,38 @@ symptom. That is what the type-checker and the counters exist to catch.
 
 ---
 
+### The fifth defect: tool calls vanished on every replay
+
+Same family, same silence. `renderColdStartHistory` skipped any message whose
+rendered text was empty:
+
+```js
+const { text } = flattenContent(message.content);
+if (trimmed.length === 0) continue;
+```
+
+An assistant message that made a tool call has `content: null`. It rendered as
+empty, so it was skipped, and its `tool_calls` array was never examined. Every
+tool call was dropped from every replay.
+
+The model therefore saw:
+
+```
+[USER]        Check the deploy script and tell me the port.
+[TOOL RESULT] PORT=8080
+```
+
+No call. No tool name. No arguments. It was handed a conclusion with the action
+removed — unable to see what it had done, and unable to build on it. With several
+tools in one round the results were undifferentiated blocks.
+
+Found by rendering a realistic tool turn and reading the output, rather than by
+reading the code. Calls now render as `[TOOL CALL] <name> <args>` and results as
+`[TOOL RESULT (<tool>)]`, with tests for the arguments-missing case so the name
+cannot be lost one level down.
+
+---
+
 ## 2. Proven
 
 | Claim | Evidence |

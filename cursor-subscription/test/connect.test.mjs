@@ -267,3 +267,59 @@ test("an appended instruction reaches the system blob, and is not duplicated inl
 	assert.ok(systemText.includes("valid JSON object"), "the appended instruction is included");
 	assert.ok(!history.includes("base rules"), "and it is not repeated as conversation text");
 });
+
+// --- tool calls must survive a replay ---------------------------------------
+
+const toolTurn = [
+	{ role: "system", content: "harness rules" },
+	{ role: "user", content: "Check the deploy script and tell me the port." },
+	{
+		role: "assistant",
+		content: null,
+		tool_calls: [
+			{ id: "c1", type: "function", function: { name: "read_file", arguments: '{"path":"/srv/deploy.sh"}' } },
+		],
+	},
+	{ role: "tool", tool_call_id: "c1", tool_name: "read_file", content: "PORT=8080" },
+	{ role: "user", content: "What port will it use?" },
+];
+
+test("a tool call survives a replay instead of being skipped", () => {
+	// An assistant message with tool calls has `content: null`, so it rendered as
+	// empty and was skipped — taking the call with it. The model then saw a bare
+	// `[TOOL RESULT]` with no call before it: a conclusion whose action had been
+	// removed, and no way to see what it had done or with what arguments.
+	const { history } = renderColdStartHistory(toolTurn);
+	assert.ok(history.includes("read_file"), "the tool name must reach the model");
+	assert.ok(history.includes("deploy.sh"), "and the arguments it was called with");
+	assert.ok(history.includes("[TOOL CALL]"), "and it must be labelled as a call");
+});
+
+test("a tool result is paired with the tool that produced it", () => {
+	// Without the name, several results in one round are undifferentiated.
+	const { history } = renderColdStartHistory(toolTurn);
+	assert.ok(history.includes("[TOOL RESULT (read_file)]"), "the result names its tool");
+});
+
+test("an assistant message with neither text nor calls is still skipped", () => {
+	// The skip is correct for a genuinely empty message; it was only wrong for one
+	// that carried calls.
+	const { history } = renderColdStartHistory([
+		{ role: "user", content: "hello" },
+		{ role: "assistant", content: "" },
+		{ role: "user", content: "again" },
+	]);
+	assert.ok(!history.includes("[ASSISTANT]"), "an empty assistant turn adds nothing");
+});
+
+test("a call with unparseable arguments still names the tool", () => {
+	// Losing the whole call because its arguments are odd would be the same bug
+	// again, one level down.
+	const { history } = renderColdStartHistory([
+		{ role: "user", content: "go" },
+		{ role: "assistant", content: null, tool_calls: [{ id: "c", function: { name: "shell" } }] },
+		{ role: "tool", tool_call_id: "c", content: "ok" },
+		{ role: "user", content: "and?" },
+	]);
+	assert.ok(history.includes("[TOOL CALL] shell"), "the name survives missing arguments");
+});

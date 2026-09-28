@@ -85,10 +85,30 @@ export function collectSystemText(messages) {
 	return parts.join("\n\n");
 }
 
+/**
+ * Render one tool call as a line the model can read.
+ *
+ * Text rather than the protocol's typed `ConversationHistoryToolCall`, which
+ * carries `tool_call_id`, `tool_name` and `args_json`. The typed form is the
+ * better answer and is not wired up yet; this stops the call from being lost.
+ */
+function renderToolCall(call) {
+	const fn = call?.function;
+	const name = typeof fn?.name === "string" ? fn.name : "";
+	if (name.length === 0) return "";
+	const args = typeof fn?.arguments === "string" ? fn.arguments : "";
+	return args.length > 0 ? `[TOOL CALL] ${name} ${args}` : `[TOOL CALL] ${name}`;
+}
+
 /** Label a prior message for the cold-start transcript, as the reference does. */
 function coldStartLabel(message) {
 	if (message?.role === "assistant") return "ASSISTANT";
-	if (message?.role === "tool") return "TOOL RESULT";
+	if (message?.role === "tool") {
+		// ZCode sends the tool name on the result, so the pairing survives even
+		// when several tools ran in one round.
+		const name = typeof message?.tool_name === "string" ? message.tool_name.trim() : "";
+		return name.length > 0 ? `TOOL RESULT (${name})` : "TOOL RESULT";
+	}
 	return "USER";
 }
 
@@ -104,10 +124,22 @@ export function renderColdStartHistory(messages) {
 	for (const message of messages) {
 		const role = message?.role;
 		if (role === "system" || role === "developer") continue;
+
 		const { text } = flattenContent(message.content);
 		const trimmed = text.trim();
-		if (trimmed.length === 0) continue;
-		entries.push({ label: coldStartLabel(message), text: trimmed });
+		const calls = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
+
+		// An assistant message that made tool calls has `content: null`, so it used
+		// to render as empty and be skipped — taking the calls with it. The model
+		// then received `[TOOL RESULT]` blocks with no call before them: a
+		// conclusion with the action removed, unable to see what it had done or
+		// with what arguments, and unable to build on it.
+		if (trimmed.length === 0 && calls.length === 0) continue;
+
+		const rendered = calls.map(renderToolCall).filter((line) => line.length > 0);
+		const body = [trimmed, ...rendered].filter((part) => part.length > 0).join("\n");
+		if (body.length === 0) continue;
+		entries.push({ label: coldStartLabel(message), text: body });
 	}
 	if (entries.length === 0) return { history: "", lastUser: "" };
 
