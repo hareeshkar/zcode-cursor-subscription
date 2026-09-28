@@ -241,6 +241,49 @@ Three other silent-but-fatal paths were found alongside it, all now counted and 
 The effective mode is now printed at startup, because a recorded stall cannot be
 attributed to a path without it.
 
+### The regression matrix: native field 7 does not reach the model either
+
+A permanent matrix was added (`test/live-structured.mjs`, gated by
+`CURSOR_LIVE_TESTS=1`) so every replay path is measured by recall rather than by
+whether a reply arrived. The shim's startup line now prints the mode, so each
+result is attributable to a path.
+
+| Shape | TEXT transcript | NATIVE field 7 (our encoder) |
+|---|---|---|
+| user/assistant pair | **"Alice"** recalled, 3.7 s | timeout |
+| tool call + result | **"8080"** recalled, 4.6 s | timeout |
+| full chain | **"Your name is Alice and the app listens on port 8080"**, 4.4 s | *"Searching the workspace for your name and the app's port configuration"* — **amnesia** |
+
+The full-chain native reply is the decisive cell: the model tried to *search* for
+facts that should have been in its context. The history did not reach it.
+
+**This corrects an inference made one round earlier.** The workflow's seven
+shapes all replied and two recalled a canary — but those recalls were TEXT-mode
+runs; only one case set the structured flag, and its reply ("I'll fetch the
+current weather") was itself evidence of amnesia that went unread. The mode was
+not printed then, so the results could not be attributed. Now it is, and the
+attribution reverses the conclusion.
+
+So the three locations stand measured:
+
+| Location | Effect on the model's context |
+|---|---|
+| Text transcript in the action | **reaches the model** — pair, tool chain and full chain all recalled |
+| `UserMessageAction.conversation_history`, our encoding | **does not reach the model** — amnesia on the full chain; timeouts on the simpler shapes |
+| `ConversationState.turns`, blob ids | ignored |
+
+Two unexplored leads, recorded rather than chased:
+
+1. **Cursor serialises messages as JSON strings in several places.**
+   `root_prompt_messages_json` is named for it, the blob it references contains
+   `{"role":"system","content":…}`, and a captured checkpoint's field 4 held a
+   literal `{"id":"1","role":"assistant","conten…}` JSON string. Our field-7
+   encoder writes protobuf messages; whether the server wants JSON-in-proto there
+   is untested.
+2. **`UserMessageAction.prepend_user_messages` (field 4)** exists, is repeated,
+   and shares `user_message`'s type — a documented-looking alternative slot for
+   prior messages that nothing has tried.
+
 ### The literal experiment: turns in state are ignored
 
 With the instrument fixed, the control/test pair the withdrawn diagnosis called

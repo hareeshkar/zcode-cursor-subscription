@@ -157,7 +157,8 @@ where" is visible in one call.
 ## Development
 
 ```sh
-node --test test/*.test.mjs          # 99 unit tests, no quota
+node --test test/*.test.mjs          # 118 unit tests, no quota
+CURSOR_LIVE_TESTS=1 node test/live-structured.mjs [baseUrl]   # the replay matrix
 CURSOR_LIVE_TESTS=1 node test/live-roundtrip.mjs [models]
 CURSOR_LIVE_TESTS=1 node test/live-conversation.mjs [model]
 node test/sad-paths.mjs              # malformed input; one real completion
