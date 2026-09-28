@@ -45,9 +45,14 @@ const TOOLS = [
 const CASES = [
 	{
 		name: "no-history",
-		messages: [{ role: "user", content: "What is my name? Answer with just the name." }],
+		messages: [
+			{
+				role: "user",
+				content: "What is my name? If you were not told, reply with the single word UNKNOWN.",
+			},
+		],
 		expect: null,
-		why: "control — with no prior turns the model cannot know the name",
+		why: "control — with no prior turns the model cannot know the name. Phrased so the model answers directly instead of trying to search, which without tools makes the run loop on refusals and time out.",
 	},
 	{
 		name: "pair",
@@ -137,5 +142,6 @@ for (const c of CASES) {
 	}
 }
 
-console.log(`\n${failures === 0 ? "PASS — native history reaches the model's context" : `${failures} failure(s)`}`);
+// Mode-neutral: this script proves whichever replay path the shim was started in.
+console.log(`\n${failures === 0 ? "PASS — history reaches the model's context on this path" : `${failures} failure(s)`}`);
 process.exit(failures === 0 ? 0 : 1);
