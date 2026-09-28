@@ -155,6 +155,40 @@ directory, then verifies nothing survived. A reinstall afterwards comes up clean
 **The marketplace registration is deliberately kept** — it is how a reinstall finds the plugin. Deleting
 the clone does not uninstall the plugin; uninstall first, then delete the folder.
 
+## The uninstall / reinstall contract
+
+Get this wrong and the user meets a bare `invalid api key` in the UI, which
+looks like a broken provider and is really stale state.
+
+**After `/uninstall-cursor-and-plugin` there is nothing left.** No credential, no provider, no
+model list, no install record, no cache, no data directory. That is the point of uninstalling.
+
+**Reinstalling restores code only — not configuration.** So a reinstall is *not* a working setup. The
+user must run `/connect-cursor-and-initialize` again. Do not tell them it is done until they have.
+
+Two things make this easy to get wrong:
+
+1. **ZCode holds `provider_config.json` in memory and writes its own copy back.** A provider the
+   uninstall removed can reappear. Always re-check with `cursor_doctor` after any uninstall, and
+   prefer a **full quit (⌘Q) and reopen** over closing the window, so ZCode reloads the file rather
+   than overwriting it.
+2. **A reinstall rotates the shim's API key.** The data directory is wiped, so the next launch mints
+   a new key — while a resurrected provider entry still holds the old one, and every turn is 401.
+
+Since 0.4.0 the shim **repairs (2) itself on startup**: if it finds a provider pointing at it whose
+key is stale, it rewrites the key and says so on stderr. It never creates a provider, never touches
+the model list, and never writes when there is nothing wrong. `cursor_doctor` also reports a mismatch
+directly, comparing hashes so neither key is ever echoed.
+
+**If a turn fails with `invalid_api_key`:**
+
+1. Run `cursor_doctor`. A "the provider's API key is stale" line is the answer; re-running
+   `/connect-cursor-and-initialize` repairs it.
+2. If the doctor is clean, the shim is not serving on the port ZCode is calling — check the base URL
+   matches the reported port.
+3. Do not paste a key from anywhere. The shim owns it, and the provider is written from the shim's
+   copy.
+
 ## Failure handling
 
 Each failure means something different. Report the specific one and its remedy; do not retry blindly.
@@ -168,7 +202,7 @@ Each failure means something different. Report the specific one and its remedy; 
 | Self-test returns 0 models | The session cannot answer | **Do not send them to Settings.** Report it; a credential refresh will not fix a transport error |
 | Connection refused, nothing on the port | The shim is not running | `cursor_doctor` reports the real state. A restart clears a wedged session |
 | `cursor_doctor` says the ports disagree | The shim moved ports and the provider was not updated | Re-run `/connect-cursor-and-initialize` |
-| Provider 401 | The key in ZCode and the shim's key disagree | Re-run `/connect-cursor-and-initialize` to rewrite the entry |
+| Provider 401 / `invalid_api_key` | The provider's key is stale after a reinstall | `cursor_doctor` names it; re-run `/connect-cursor-and-initialize`. The shim also self-repairs on next start |
 | Models absent from the picker after connecting | ZCode has not restarted | Ask for the **full** quit and reopen |
 
 **Do not create a provider by hand** to work around a failure. The whole point of

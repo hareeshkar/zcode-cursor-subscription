@@ -179,7 +179,8 @@ export async function ensureShimProvider({
 	}
 
 	let created = false;
-	if (findShimProvider(config, baseUrl) === undefined) {
+	const existing = findShimProvider(config, baseUrl);
+	if (existing === undefined) {
 		const providerId = `cursor-${randomBytes(4).toString("hex")}`;
 		rules.providerRules.push({
 			providerId,
@@ -192,6 +193,28 @@ export async function ensureShimProvider({
 			},
 		});
 		created = true;
+	}
+
+	// Refresh the key on an entry that already exists. Reinstalling the plugin
+	// wipes the data directory, so the next launch mints a *new* shim key while
+	// the provider keeps the old one — and every request then fails 401. Since
+	// re-running the setup is the natural recovery, it has to be a repair rather
+	// than a no-op. Matched by base URL, so a renamed provider is still found.
+	if (!created && existing !== undefined) {
+		const rule = rules.providerRules.find((r) => r.providerId === existing.providerId);
+		if (rule?.config?.access?.apiKey !== apiKey) {
+			rule.config = rule.config ?? {};
+			rule.config.access = { ...(rule.config.access ?? {}), type: "api-key", apiKey };
+			try {
+				await writeConfig(path, config);
+			} catch (error) {
+				return {
+					ok: false,
+					reason: "config-unwritable",
+					advice: `Could not update the provider's API key (${error.message}).`,
+				};
+			}
+		}
 	}
 
 	// Persist the new entry before delegating. `registerModels` re-reads the file
@@ -310,4 +333,46 @@ export async function registerModels({ models, baseUrl, path = providerConfigPat
 		added: clean.length - before,
 		total: clean.length,
 	};
+}
+
+/**
+ * Repair a provider entry that points at us but holds a stale API key.
+ *
+ * Uninstall removes the data directory, so the next launch mints a *new* shim
+ * key. ZCode holds `provider_config.json` in memory and writes its own copy
+ * back, which can resurrect the provider entry we removed — leaving an entry
+ * that is correctly addressed and permanently 401. That combination is what
+ * produced "invalid api key" in the UI with no way to tell why.
+ *
+ * So the shim reconciles on start. It only ever *repairs* an entry that is
+ * already ours; it never creates one, never touches the model list, and never
+ * runs if there is nothing to fix. Making the user discover this by reading a
+ * 401 is the failure mode being designed out.
+ *
+ * @returns {Promise<{ checked: boolean, repaired: boolean, providerName?: string }>}
+ */
+export async function reconcileProviderKey({ baseUrl, apiKey, path = providerConfigPath() }) {
+	let config;
+	try {
+		config = await readConfig(path);
+	} catch {
+		return { checked: false, repaired: false };
+	}
+	const match = findShimProvider(config, baseUrl);
+	if (match === undefined) return { checked: true, repaired: false };
+
+	const rules = config.config?.providerConfigRules?.providerRules ?? [];
+	const rule = rules.find((r) => r.providerId === match.providerId);
+	if (!rule || rule.config?.access?.apiKey === apiKey) {
+		return { checked: true, repaired: false, providerName: match.providerName };
+	}
+
+	rule.config = rule.config ?? {};
+	rule.config.access = { ...(rule.config.access ?? {}), type: "api-key", apiKey };
+	try {
+		await writeConfig(path, config);
+	} catch {
+		return { checked: true, repaired: false, providerName: match.providerName };
+	}
+	return { checked: true, repaired: true, providerName: match.providerName };
 }

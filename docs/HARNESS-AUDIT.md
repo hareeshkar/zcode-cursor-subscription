@@ -187,6 +187,43 @@ tests, so the guarantee cannot rot silently — which is the whole lesson of §1
 
 ---
 
+## 3b. The reinstall trap, and why it is now closed
+
+Found by tripping it: a forced reinstall wiped the data directory, the next
+launch minted a new shim key, and the user's provider entry still held the old
+one. Every turn failed `invalid api key` with no indication of why.
+
+Two independent causes, both outside the shim's control:
+
+- **ZCode writes `provider_config.json` from an in-memory copy.** A provider the
+  uninstall removed can reappear.
+- **A reinstall rotates the shim key**, because the key lives in the wiped data
+  directory, while the provider entry lives in a file that is not.
+
+Which means a reinstall can produce a correctly addressed provider that is
+permanently 401 — and the user is the one who finds out.
+
+Closed by two things, because either alone leaves a gap:
+
+1. `reconcileProviderKey` runs when the shim starts. If a provider already points
+   at this shim and its key is stale, the key is rewritten and the repair is
+   logged. It never creates a provider, never touches the model list, and never
+   writes when there is nothing wrong.
+2. `ensureShimProvider` refreshes the key on an existing entry, so re-running
+   the setup is a repair rather than a no-op.
+
+`cursor_doctor` also reports the mismatch, comparing SHA-256 digests in constant
+time so neither key is echoed back. **Verified end to end**: with a deliberately
+stale entry present, merely starting the shim repaired it — key matched, 241
+models untouched, no user action.
+
+The residue is a discipline, not a bug: **a reinstall is not a setup.** The user
+must run `/connect-cursor-and-initialize` again, and should fully quit (⌘Q)
+rather than close the window so ZCode reloads the file instead of overwriting it.
+That is written into `AGENTS.md` so an agent cannot rediscover it the hard way.
+
+---
+
 ## 4. What the literature says we got wrong, and what it fixed
 
 Sources gathered while fixing §1, with the parts that changed this codebase marked.

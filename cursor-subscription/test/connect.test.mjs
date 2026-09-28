@@ -14,7 +14,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { ensureShimProvider } from "../lib/register-provider.mjs";
+import { ensureShimProvider, reconcileProviderKey } from "../lib/register-provider.mjs";
 import { planTurn } from "../lib/conversation-store.mjs";
 import { renderColdStartHistory } from "../lib/conversation.mjs";
 
@@ -154,4 +154,88 @@ test("the system prompt is never replayed as conversation text", () => {
 	// tokens and let a model treat its own instructions as user content.
 	const { history } = renderColdStartHistory(withTool);
 	assert.ok(!history.includes("system rules"), "the system prompt is not in the transcript");
+});
+
+test("re-running setup repairs a stale key left by a reinstall", async () => {
+	// Every forced reinstall wipes the data directory, so the next launch mints
+	// a new shim key while the provider keeps the old one — and chat then fails
+	// 401 on every request. Re-running the setup is the natural recovery, so it
+	// has to repair rather than no-op.
+	const path = await scratchConfig();
+	await ensureShimProvider({ models: ["composer-2.5"], baseUrl: BASE, apiKey: "first-key", path });
+	await ensureShimProvider({ models: ["composer-2.5"], baseUrl: BASE, apiKey: "rotated-key", path });
+
+	const written = JSON.parse(await readFile(path, "utf8"));
+	const ours = written.config.providerConfigRules.providerRules.find(
+		(r) => r.providerName === "Cursor Subscription",
+	);
+	assert.equal(ours.config.access.apiKey, "rotated-key", "the entry must carry the live key");
+	assert.equal(written.config.providerConfigRules.providerRules.length, 2, "and not be duplicated");
+});
+
+test("a matching key is left untouched", async () => {
+	const path = await scratchConfig();
+	const args = { models: ["composer-2.5"], baseUrl: BASE, apiKey: "stable", path };
+	await ensureShimProvider(args);
+	const before = await readFile(path, "utf8");
+	await ensureShimProvider(args);
+	assert.equal(await readFile(path, "utf8"), before, "a run with nothing to repair changes nothing");
+});
+
+test("startup reconciliation repairs a resurrected provider holding a stale key", async () => {
+	// The uninstall/reinstall trap. Uninstall removes the data directory, so the
+	// next launch mints a new shim key; ZCode then writes its own copy of
+	// provider_config.json back, resurrecting an entry with the old key. The
+	// result is a correctly addressed provider that 401s on every turn.
+	const path = await scratchConfig();
+	await writeFile(
+		path,
+		JSON.stringify(
+			{
+				config: {
+					providerConfigRules: {
+						providerRules: [
+							{
+								providerId: "cursor-1",
+								providerName: "Cursor Subscription",
+								config: {
+									api: { type: "openai-chat-completions", baseUrl: BASE },
+									access: { type: "api-key", apiKey: "key-from-the-previous-install" },
+									personalModelIds: ["composer-2.5"],
+								},
+							},
+						],
+					},
+				},
+			},
+			null,
+			2,
+		),
+	);
+
+	const result = await reconcileProviderKey({ baseUrl: BASE, apiKey: "fresh-key", path });
+	assert.equal(result.checked, true);
+	assert.equal(result.repaired, true);
+
+	const written = JSON.parse(await readFile(path, "utf8"));
+	const ours = written.config.providerConfigRules.providerRules[0];
+	assert.equal(ours.config.access.apiKey, "fresh-key");
+	assert.deepEqual(ours.config.personalModelIds, ["composer-2.5"], "the model list is left alone");
+	assert.equal(written.config.providerConfigRules.providerRules.length, 1, "and no entry is added");
+});
+
+test("reconciliation never creates a provider or touches one that is not ours", async () => {
+	const path = await scratchConfig();
+	await writeFile(
+		path,
+		JSON.stringify(
+			{ config: { providerConfigRules: { providerRules: [{ providerId: "o", providerName: "Other", config: { api: { baseUrl: "https://api.other.dev/v1" } } }] } } },
+			null,
+			2,
+		),
+	);
+	const before = await readFile(path, "utf8");
+	const result = await reconcileProviderKey({ baseUrl: BASE, apiKey: "k", path });
+	assert.equal(result.repaired, false);
+	assert.equal(await readFile(path, "utf8"), before, "the file is untouched");
 });

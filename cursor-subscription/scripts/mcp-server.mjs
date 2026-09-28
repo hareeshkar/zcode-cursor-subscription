@@ -21,7 +21,7 @@ import { CredentialStore } from "../lib/credentials.mjs";
 import { CursorShim } from "../lib/shim.mjs";
 import { fetchUsableModels, sortModelsByName } from "../lib/cursor-client.mjs";
 import { pickProbeModels, probeModel } from "../lib/selftest.mjs";
-import { registerModels, ensureShimProvider } from "../lib/register-provider.mjs";
+import { registerModels, ensureShimProvider, reconcileProviderKey } from "../lib/register-provider.mjs";
 import { removeShimProvider, removePluginInstallation } from "../lib/uninstall.mjs";
 import { compareEndpoints, inspectProviderConfig } from "../lib/diagnose.mjs";
 import { DEFAULT_SHIM_PORT, FALLBACK_MODELS, SHIM_HOST, SHIM_PATHS, dataDir } from "../lib/config.mjs";
@@ -525,7 +525,7 @@ const TOOLS = [
 			}
 
 			const provider = await inspectProviderConfig(
-				actual ? { baseUrl: actual } : {},
+				actual ? { baseUrl: actual, apiKey: shim.apiKey } : {},
 			);
 			if (!provider.found) {
 				const because = provider.error ? ` — ${provider.error}` : "";
@@ -542,6 +542,15 @@ const TOOLS = [
 				} else {
 					faults.push("the provider's base URL does not match the shim");
 					lines.push(`  FAIL  provider "${provider.providerName}" — ${agreement.detail}`);
+				}
+				if (provider.apiKeyMatches === false) {
+					faults.push("the provider's API key does not match the shim's");
+					lines.push(
+						"  FAIL  the provider's API key is stale — every request is refused with 401.",
+					);
+					lines.push(
+						"        Re-run /connect-cursor-and-initialize to write the current key.",
+					);
 				}
 				if (provider.models === 0) {
 					faults.push("the provider has no models, so nothing appears in the picker");
@@ -840,6 +849,22 @@ shim.bound?.then((outcome) => {
 				`${shim.host}:${shim.port}. Point the ZCode provider at http://${shim.host}:${shim.port}/v1\n`,
 		);
 	}
+	// A reinstall rotates the shim key, and ZCode can then write a provider entry
+	// back holding the old one, so every chat turn 401s. Repair it here rather
+	// than letting the user meet a bare "invalid api key" in the UI.
+	reconcileProviderKey({
+		baseUrl: `http://${shim.host}:${shim.port}/v1`,
+		apiKey: shim.apiKey,
+	})
+		.then((result) => {
+			if (result.repaired) {
+				process.stderr.write(
+					`cursor-subscription: updated the API key on provider "${result.providerName}", ` +
+						"which was stale after a reinstall.\n",
+				);
+			}
+		})
+		.catch(() => {});
 });
 
 export { shim, CONSENT_NOTICE, TOOLS };

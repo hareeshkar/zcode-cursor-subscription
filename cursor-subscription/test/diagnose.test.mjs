@@ -10,7 +10,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -87,4 +87,23 @@ test("a provider with zero models is visible to the caller", async () => {
 	const found = await inspectProviderConfig({ path, baseUrl: "http://127.0.0.1:8477/v1" });
 	assert.equal(found.found, true);
 	assert.equal(found.models, 0, "the picker would be empty, which the tool reports as a fault");
+});
+
+test("a stale provider key is detected without revealing either secret", async () => {
+	const path = await scratch(withProvider("http://127.0.0.1:8477/v1", 2));
+	// Give the entry a key at all, then compare against a different one.
+	const config = JSON.parse(await readFile(path, "utf8"));
+	config.config.providerConfigRules.providerRules[0].config.access = { type: "api-key", apiKey: "old-key" };
+	await writeFile(path, JSON.stringify(config, null, 2));
+
+	const stale = await inspectProviderConfig({ path, baseUrl: "http://127.0.0.1:8477/v1", apiKey: "new-key" });
+	assert.equal(stale.found, true);
+	assert.equal(stale.apiKeyMatches, false, "a reinstalled shim's key must be seen as stale");
+
+	const same = await inspectProviderConfig({ path, baseUrl: "http://127.0.0.1:8477/v1", apiKey: "old-key" });
+	assert.equal(same.apiKeyMatches, true);
+
+	// The comparison must not turn the diagnostic into a way to read the key.
+	assert.ok(!JSON.stringify(stale).includes("old-key"), "no secret is echoed back");
+	assert.ok(!JSON.stringify(stale).includes("new-key"));
 });

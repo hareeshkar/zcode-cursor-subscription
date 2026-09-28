@@ -15,6 +15,7 @@
  */
 
 import { readFile } from "node:fs/promises";
+import { createHash, timingSafeEqual } from "node:crypto";
 
 import { findShimProvider, providerConfigPath } from "./register-provider.mjs";
 
@@ -27,7 +28,7 @@ import { findShimProvider, providerConfigPath } from "./register-provider.mjs";
  *
  * @returns {Promise<{ found: boolean, path: string, error?: string, providerName?: string, baseUrl?: string, models?: number, modelRules?: number }>}
  */
-export async function inspectProviderConfig({ path = providerConfigPath(), baseUrl } = {}) {
+export async function inspectProviderConfig({ path = providerConfigPath(), baseUrl, apiKey } = {}) {
 	let config;
 	try {
 		config = JSON.parse(await readFile(path, "utf8"));
@@ -48,14 +49,35 @@ export async function inspectProviderConfig({ path = providerConfigPath(), baseU
 	}
 
 	const modelRules = config?.config?.modelConfigRules?.providerModelRules ?? [];
+	const rule = rules.find((r) => r.providerId === match.providerId);
 	return {
 		found: true,
 		path,
 		providerName: match.providerName,
 		baseUrl: match.baseUrl,
-		models: rules.find((r) => r.providerId === match.providerId)?.config?.personalModelIds?.length ?? 0,
+		models: rule?.config?.personalModelIds?.length ?? 0,
 		modelRules: modelRules.filter((r) => r.providerId === match.providerId).length,
+		apiKeyMatches: apiKey === undefined ? undefined : sameSecret(rule?.config?.access?.apiKey, apiKey),
 	};
+}
+
+/**
+ * Compare two secrets without revealing either.
+ *
+ * The mismatch that breaks a provider is a stale key after a reinstall, and it
+ * is invisible from the outside: a 401 is the only symptom, and the reason is
+ * not obvious. Hashing lets `cursor_doctor` name the fault as a mismatch
+ * rather than leaving the user to guess — without the diagnostic ever becoming
+ * a way to read the key.
+ */
+function sameSecret(a, b) {
+	if (typeof a !== "string" || typeof b !== "string") return false;
+	const digest = (value) => createHash("sha256").update(value).digest();
+	try {
+		return timingSafeEqual(digest(a), digest(b));
+	} catch {
+		return false;
+	}
 }
 
 /**
