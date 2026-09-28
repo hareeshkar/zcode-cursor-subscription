@@ -745,7 +745,11 @@ export class CursorShim {
 						// frame buffer, which is reused as the stream continues.
 						checkpoint = Uint8Array.from(frame.payload);
 						if (process.env.CURSOR_SHIM_DEBUG) {
-							this.log(`checkpoint hex=${Buffer.from(frame.payload).toString("hex")}`);
+							// The full bytes matter when a field path is in question — that
+							// is how the token-count path was settled — but logging them on
+							// every checkpoint drowns the trace.
+							const tokens = decodeCheckpointUsedTokens(checkpoint);
+							this.log(`checkpoint ${frame.payload.length}B, used_tokens=${tokens ?? "none"}`);
 						}
 						const used = decodeCheckpointUsedTokens(checkpoint);
 						if (used !== undefined) promptTokens = used;
