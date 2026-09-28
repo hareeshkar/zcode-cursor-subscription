@@ -1,0 +1,18 @@
+{
+  "name": "dev-zcode-cursor-b9b95b48",
+  "plugins": [
+    {
+      "name": "cursor-subscription",
+      "source": "./cursor-subscription",
+      "version": "0.3.0",
+      "description": "Use a Cursor subscription as a first-class ZCode provider: Cursor models appear in the model picker, with ZCode's own tools, permissions and context management.",
+      "displayName": "Cursor Subscription",
+      "displayName_i18n": {
+        "zh-CN": "Cursor 订阅"
+      },
+      "description_i18n": {
+        "zh-CN": "将 Cursor 订阅作为 ZCode 原生模型提供方。"
+      }
+    }
+  ]
+}

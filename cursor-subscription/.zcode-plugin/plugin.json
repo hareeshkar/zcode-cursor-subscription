@@ -1,0 +1,28 @@
+{
+  "name": "cursor-subscription",
+  "version": "0.3.0",
+  "description": "Use a Cursor subscription as a first-class ZCode provider: Cursor models appear in the model picker, with ZCode's own tools, permissions and context management.",
+  "description_i18n": {
+    "en": "Use a Cursor subscription as a first-class ZCode provider: Cursor models appear in the model picker, with ZCode's own tools, permissions and context management.",
+    "zh-CN": "将 Cursor 订阅作为 ZCode 原生模型提供方：Cursor 模型直接出现在模型选择器中，沿用 ZCode 自身的工具、权限与上下文管理。"
+  },
+  "author": { "name": "ZCode Cursor Subscription contributors" },
+  "license": "MIT",
+  "homepage": "https://github.com/orrinzeng/dsh-cursor-subscription",
+  "keywords": ["cursor", "provider", "subscription", "oauth", "pkce"],
+  "skills": "skills",
+  "commands": "commands",
+  "mcpServers": "./.mcp.json",
+  "userConfig": {
+    "port": {
+      "type": "string",
+      "default": "8477",
+      "description": "Loopback port the local shim listens on. Must match the baseUrl configured in the ZCode provider."
+    },
+    "auto_start": {
+      "type": "boolean",
+      "default": true,
+      "description": "Start the local shim automatically when the MCP server loads. Turn off if you start it yourself with scripts/shim.mjs."
+    }
+  }
+}

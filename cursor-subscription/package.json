@@ -1,0 +1,22 @@
+{
+  "name": "zcode-cursor-subscription",
+  "version": "0.3.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "Use a Cursor subscription as a first-class ZCode provider.",
+  "main": "./lib/shim.mjs",
+  "exports": {
+    "./shim": "./lib/shim.mjs",
+    "./client": "./lib/cursor-client.mjs",
+    "./auth": "./lib/auth.mjs"
+  },
+  "bin": {
+    "cursor-subscription-shim": "./scripts/shim.mjs"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "shim": "node ./scripts/shim.mjs"
+  },
+  "engines": { "node": ">=20" }
+}

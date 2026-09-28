@@ -1,0 +1,46 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 20 is the floor the plugin declares; 24 is what it is developed against.
+        node: [20, 22, 24]
+    name: node ${{ matrix.node }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # No dependencies and no build step — the plugin is plain ESM on Node's
+      # standard library. The install line exists only to prove that.
+      - name: Install (no dependencies expected)
+        run: npm install --no-audit --no-fund
+
+      - name: Verify the marketplace manifest matches the plugin
+        run: |
+          node -e '
+            const fs = require("fs");
+            const market = JSON.parse(fs.readFileSync("marketplace.json", "utf8"));
+            const plugin = JSON.parse(fs.readFileSync("cursor-subscription/.zcode-plugin/plugin.json", "utf8"));
+            const pkg = JSON.parse(fs.readFileSync("cursor-subscription/package.json", "utf8"));
+            const entry = market.plugins.find((p) => p.name === plugin.name);
+            if (!entry) throw new Error(`marketplace.json has no entry for ${plugin.name}`);
+            for (const [label, v] of [["marketplace", entry.version], ["plugin.json", plugin.version], ["package.json", pkg.version]]) {
+              if (v !== plugin.version) throw new Error(`version mismatch — ${label} says ${v}, plugin.json says ${plugin.version}`);
+            }
+            console.log(`versions agree: ${plugin.version}`);
+          '
+
+      - name: Test
+        working-directory: cursor-subscription
+        run: node --test "test/*.test.mjs"

@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# ZCode's per-plugin scratch space. Workflow drafts and run logs are local to a
+# machine and are not part of the distributed plugin.
+.zcode/
+cursor-subscription/.zcode/
+
+# Credentials and local state. These live in the plugin data directory at
+# ~/.zcode/cli/plugins/data/<plugin-id>/ and must never enter the repository:
+# `credentials.json` is a live Cursor OAuth bearer token, and `shim-key` is the
+# loopback key that guards the local shim.
+credentials.json
+shim-key
+shim-port
+*.credentials.json
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Logs and coverage
+*.log
+npm-debug.log*
+yarn-error.log*
+coverage/
+.nyc_output/
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# Build output
+dist/
+build/
+*.tsbuildinfo

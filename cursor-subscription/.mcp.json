@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "cursor-subscription": {
+      "command": "node",
+      "args": [
+        "${ZCODE_PLUGIN_ROOT}/scripts/mcp-server.mjs"
+      ],
+      "cwd": "${ZCODE_PROJECT_DIR}",
+      "env": {
+        "CURSOR_SUBSCRIPTION_DATA": "${ZCODE_PLUGIN_DATA}",
+        "CURSOR_SHIM_PORT": "${user_config.port}"
+      },
+      "timeoutMs": 900000
+    }
+  }
+}
