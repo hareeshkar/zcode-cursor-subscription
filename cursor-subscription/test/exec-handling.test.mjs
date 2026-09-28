@@ -26,7 +26,8 @@ import {
 	encodeExecClientMessage,
 	encodeExecClientMessageEnvelope,
 } from "../lib/cursor-client.mjs";
-import { planRequestControls } from "../lib/shim.mjs";
+import { canAnchorTurn, planRequestControls } from "../lib/shim.mjs";
+import { ConversationStore } from "../lib/conversation-store.mjs";
 import { Writer, Reader, encodeValue } from "../lib/proto.mjs";
 
 /** Build an ExecServerMessage exactly as observed on the wire. */
@@ -261,4 +262,43 @@ test("a plain request is left alone", () => {
 	assert.equal(plan.extraSystem, "");
 	assert.equal(plan.suppressTools, false);
 	assert.equal(plan.only, undefined);
+});
+
+// --- anchoring: the bug that made the resume rate structurally zero ---------
+
+test("a turn with no tool call anchors, whichever null-ish sentinel is used", () => {
+	// Regression guard. The sentinel was `null` while the check tested for
+	// `undefined`; `null !== undefined`, so every turn looked like a terminal
+	// tool call, the anchor was written and immediately discarded, and the resume
+	// rate was zero forever. Cursor had been sending checkpoints all along.
+	const checkpoint = new Uint8Array([1, 2, 3]);
+	assert.equal(canAnchorTurn({ toolCall: undefined, checkpoint }), true, "undefined sentinel");
+	assert.equal(canAnchorTurn({ toolCall: null, checkpoint }), true, "null sentinel");
+	assert.equal(canAnchorTurn({ checkpoint }), true, "absent field");
+});
+
+test("a turn that ended on a tool call never anchors", () => {
+	// Its checkpoint is paused mid-tool, so resuming it would drop the tool
+	// result the host is about to send.
+	assert.equal(canAnchorTurn({ toolCall: { case: "mcpArgs" }, checkpoint: new Uint8Array([1]) }), false);
+});
+
+test("a turn with no checkpoint never anchors", () => {
+	assert.equal(canAnchorTurn({ toolCall: null, checkpoint: undefined }), false);
+	assert.equal(canAnchorTurn({ toolCall: null, checkpoint: null }), false);
+	assert.equal(canAnchorTurn({}), false);
+	assert.equal(canAnchorTurn(undefined), false, "a missing result must not throw");
+});
+
+test("an anchored turn is actually retrievable for the next one", () => {
+	// The half that makes anchoring worth anything: the store must hand the
+	// conversation back for an exact extension.
+	const store = new ConversationStore();
+	const first = [{ role: "user", content: "one" }];
+	store.record(first, "conv", { checkpoint: new Uint8Array([9]), blobs: new Map() });
+
+	const found = store.find([...first, { role: "assistant", content: "two" }]);
+	assert.ok(found, "an exact extension must find the anchor");
+	assert.equal(found.conversationId, "conv");
+	assert.equal(store.size, 1);
 });

@@ -135,6 +135,42 @@ the newest user turn becomes the action. The system prompt is published as a
 blob and is correctly *not* replayed inline. Both halves are now locked in by
 tests, so the guarantee cannot rot silently — which is the whole lesson of §1.
 
+### The third defect, and the largest of the three
+
+`conversations: 0` was recorded for months of work as "Cursor never sends
+checkpoints, so the resume path cannot engage". That was wrong. Cursor sends a
+checkpoint on **every** turn — three of them on a single plain `PONG` — and the
+shim threw each one away.
+
+The sentinel for "no tool call" was `null`:
+
+```js
+let toolCall = null;              // #collect
+if (result.toolCall !== undefined) { /* treat as a terminal tool call */ }
+```
+
+`null !== undefined` is true, so **every turn ever run** took the tool-call
+branch, discarded its anchor, and reported a resume rate of zero. The interlock
+was correct the whole time; the two halves of the code simply disagreed about
+which value means "absent".
+
+Found by instrumenting `#commit` rather than by reading it: the log said
+`checkpoint=523B toolCall=yes` on a request that registered **no tools** and
+performed **no tool call**, which is impossible unless the sentinel was wrong.
+
+Fixed by making the check total (`!= null`) and extracting the rule into
+`canAnchorTurn`, so the two halves cannot diverge again.
+
+**Verified live, for the first time in this project:**
+
+```
+turn 1  →  conversations: 1
+turn 2  (exact extension)  →  resumed: 1, resumeRate: 0.5
+```
+
+Server-side conversation reuse works. The design that was believed dead is
+live, and every claim about it can now be tested rather than assumed.
+
 ### High
 
 1. **Refusals are generic.** The reference has a per-exec rejection table

@@ -153,6 +153,31 @@ export function planRequestControls(body = {}) {
 	return { suppressTools, only, extraSystem, notes };
 }
 
+
+/**
+ * May this turn's checkpoint be used to resume the next one?
+ *
+ * Exported and pure so the rule is testable, because getting it wrong is
+ * invisible: the anchor is written and then silently discarded, no error is
+ * raised anywhere, and the only symptom is a resume rate that is structurally
+ * zero. That is exactly what happened — the sentinel for "no tool call" was
+ * `null` while this check tested for `undefined`, and `null !== undefined`, so
+ * **every turn ever run** was treated as a terminal tool call and its anchor
+ * thrown away. Cursor had been sending checkpoints the whole time.
+ *
+ * A turn that ended on a tool call must not anchor: its checkpoint is paused
+ * mid-tool, so resuming it would drop the tool result the host is about to send.
+ *
+ * @param {{ toolCall?: unknown, checkpoint?: unknown }} result
+ */
+export function canAnchorTurn(result) {
+	// `== null` covers `null` and `undefined` alike. Testing one and storing the
+	// other is the whole bug, so the check is deliberately total.
+	if (result?.toolCall != null) return false;
+	if (result?.checkpoint == null) return false;
+	return true;
+}
+
 // ---------------------------------------------------------------------------
 // Shim
 // ---------------------------------------------------------------------------
@@ -657,7 +682,9 @@ export class CursorShim {
 		let reasoning = "";
 		let execs = 0;
 		const refusals = {};
-		let toolCall = null;
+		// `undefined`, not `null`: `#commit` tests `!== undefined`, so a `null`
+		// sentinel made every turn look like a terminal tool call.
+		let toolCall;
 		let completionTokens = 0;
 		let promptTokens = 0;
 		let checkpoint;
@@ -778,18 +805,22 @@ export class CursorShim {
 	 * extension of that array to reuse it.
 	 */
 	#commit(ctx, result) {
-		if (result.toolCall !== undefined) {
-			// The run stopped on an unanswered tool call. Its checkpoint is paused
-			// mid-tool, so resuming it would drop the tool result ZCode is about to
-			// send. A conversation paused on a tool call cannot safely accept a
-			// normal user action; fall back to a textual cold start.
-			this.#conversations.forgetPrefix(ctx.messages);
-			return;
+		if (process.env.CURSOR_SHIM_DEBUG) {
+			this.log(
+				`commit: checkpoint=${result.checkpoint == null ? "none" : result.checkpoint.length + "B"} ` +
+					`toolCall=${result.toolCall == null ? "none" : "yes"} messages=${ctx.messages.length}`,
+			);
 		}
-		if (result.checkpoint === undefined) {
-			// Cursor sent no checkpoint, so there is nothing to resume from next
-			// time. Drop the anchor rather than leaving a stale one behind.
-			this.#conversations.forget(ctx.messages);
+		if (!canAnchorTurn(result)) {
+			if (result.toolCall != null) {
+				// Paused mid-tool: resuming would drop the tool result ZCode is
+				// about to send, so fall back to a textual cold start.
+				this.#conversations.forgetPrefix(ctx.messages);
+			} else {
+				// No checkpoint, so there is nothing to resume from. Do not leave a
+				// stale anchor behind.
+				this.#conversations.forget(ctx.messages);
+			}
 			return;
 		}
 		this.#conversations.record(ctx.messages, ctx.conversationId ?? randomUUID(), {

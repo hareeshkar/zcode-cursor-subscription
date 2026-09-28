@@ -24,6 +24,63 @@ import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+
+/**
+ * The model configuration written for every Cursor model.
+ *
+ * Copied field-for-field from ZCode's own catch-all rule in
+ * `config/provider/zcode-builtin.json`, because that config is *known to
+ * validate*. ZCode silently drops any model whose resolved config fails
+ * completeness validation — the model simply is not in the picker, with no
+ * error at the call site — so building this by hand from the schema would be
+ * trading a working default for a chance of a mystery.
+ *
+ * The deviations are the ones we can actually justify:
+ *
+ *   supportsImage        **false, and this was tested rather than assumed.**
+ *                        The shim encodes images correctly — the payload and the
+ *                        field-7 tag are both provably present in the run request,
+ *                        matching the reference implementation byte for byte — but
+ *                        two independent models both report receiving no image.
+ *                        Cursor does not surface them on this endpoint. Claiming
+ *                        support would make ZCode offer an attachment the model
+ *                        never sees, which is worse than not offering it.
+ *   supportsVideo        left false. Not verified, and a false claim is worse
+ *                        than a missing one.
+ *   supportsToolCall     true, and this is now proven live across four model
+ *                        families: call, execute, and use the result.
+ *   supportsJsonSchema   false. A `response_format` is folded into the system
+ *                        prompt as an instruction, not enforced by the provider,
+ *                        so claiming native schema support would overstate it.
+ *   contextWindow        200k, matching the generic default. Cursor publishes no
+ *                        per-model window, so a larger number would be invented.
+ *   maxOutputTokens      unchanged from the baseline.
+ */
+function modelConfigFor() {
+	return {
+		enabled: true,
+		properties: {
+			contextWindow: 200_000,
+			inputFormat: {
+				supportsText: true,
+				supportsImage: false,
+				supportsVideo: false,
+				supportsAudio: false,
+				supportsPdf: false,
+			},
+			outputFormat: { supportsText: true },
+			supportsToolCall: true,
+			supportsJsonSchemaOutput: false,
+			supportsNativeWebSearch: false,
+			supportsMidConversationSystem: false,
+			requiresMfjsToolSchema: false,
+		},
+		optionSpecs: {
+			maxOutputTokens: { max: 32_000 },
+		},
+	};
+}
+
 /** The provider config ZCode reads for personal providers. */
 export function providerConfigPath() {
 	const base = process.env.ZCODE_DATA_BASE_DIR;
@@ -307,8 +364,17 @@ export async function registerModels({ models, baseUrl, path = providerConfigPat
 	const modelRules = (config.config.modelConfigRules ??= {});
 	const perProvider = (modelRules.providerModelRules ??= []);
 	for (const modelId of clean) {
-		if (!perProvider.some((r) => r.providerId === provider.providerId && r.modelId === modelId)) {
-			perProvider.push({ modelId, config: { enabled: true }, providerId: provider.providerId });
+		const existingRule = perProvider.find(
+			(r) => r.providerId === provider.providerId && r.modelId === modelId,
+		);
+		const config = modelConfigFor();
+		if (existingRule) {
+			// Refresh rather than skip: an entry written by an earlier version held
+			// only `{ enabled: true }` and inherited generic capabilities the model
+			// does not deserve credit for — or, worse, understated what it can do.
+			existingRule.config = config;
+		} else {
+			perProvider.push({ modelId, config, providerId: provider.providerId });
 		}
 	}
 
