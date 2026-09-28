@@ -52,4 +52,4 @@ jobs:
 
       - name: Test
         working-directory: cursor-subscription
-        run: node --test "test/*.test.mjs"
+        run: node --test test/*.test.mjs

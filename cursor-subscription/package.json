@@ -15,7 +15,7 @@
     "cursor-subscription-shim": "./scripts/shim.mjs"
   },
   "scripts": {
-    "test": "node --test \"test/*.test.mjs\"",
+    "test": "node --test test/*.test.mjs",
     "shim": "node ./scripts/shim.mjs"
   },
   "engines": { "node": ">=20" }

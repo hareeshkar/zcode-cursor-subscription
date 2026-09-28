@@ -139,7 +139,7 @@ orrinzeng (MIT), which does the same thing for DeepSeek Harness. `proto.mjs`, `a
 ## Development
 
 ```sh
-node --test "test/*.test.mjs"
+node --test test/*.test.mjs
 ```
 
 The research dossier — protocol field maps, host contracts, the alternatives considered and why they
