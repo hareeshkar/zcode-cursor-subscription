@@ -39,7 +39,9 @@ import {
 	AgentRun,
 	decodeCheckpointUsedTokens,
 	decodeExecServerMessage,
+	decodeInteractionQuery,
 	decodeInteractionUpdate,
+	decodeTtftBreakdown,
 	decodeKvServerMessage,
 	encodeGetBlobResult,
 	encodeKvClientMessage,
@@ -73,6 +75,12 @@ export const SHIM_SERVICE = "cursor-subscription-shim";
  * path is the one whose behaviour is understood end to end.
  */
 const STRUCTURED_HISTORY = process.env.CURSOR_STRUCTURED_HISTORY === "1";
+
+/**
+ * The literal experiment: prior turns in ConversationState.turns as
+ * blob-published ids, UserMessageAction.conversation_history left empty.
+ */
+const TURNS_IN_STATE = process.env.CURSOR_TURNS_IN_STATE === "1";
 
 /**
  * Ceilings on exec traffic within a single run.
@@ -310,6 +318,7 @@ export class CursorShim {
 			host: this.host,
 			preferredPort: this.#preferredPort,
 			structuredHistory: STRUCTURED_HISTORY,
+			turnsInState: TURNS_IN_STATE,
 		};
 	}
 
@@ -744,6 +753,8 @@ export class CursorShim {
 			// Opt-in until proven against the real server. The text transcript is the
 			// fallback: fewer moving parts, and its behaviour is understood.
 			structuredHistory: STRUCTURED_HISTORY,
+			turnsInState: TURNS_IN_STATE,
+			turnsInState: TURNS_IN_STATE,
 		});
 
 		const run = { toolNames, model, messages, blobStore, conversationId };

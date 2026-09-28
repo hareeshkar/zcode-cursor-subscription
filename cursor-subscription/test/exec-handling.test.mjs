@@ -37,6 +37,8 @@ import {
 	encodeHistoryTool,
 	modelIds,
 	sortModelsByName,
+	decodeInteractionQuery,
+	decodeTtftBreakdown,
 	splitServerMessage,
 } from "../lib/cursor-client.mjs";
 import { buildStructuredHistory } from "../lib/conversation.mjs";
@@ -552,27 +554,19 @@ test("an assistant turn with no text and no calls is skipped, not encoded empty"
 
 // --- the instrument must see the whole wire --------------------------------
 
-test("a server arm we do not decode is surfaced, not dropped", () => {
+test("every declared arm is classified, none dropped", () => {
 	// AgentServerMessage declares 1,2,3,4,5,7,8. Only 1-4 were decoded and the
 	// rest vanished — no frame object, no log line, no counter. A stall was
-	// diagnosed with this true, which makes the diagnosis worthless.
-	const payload = new Writer().message(5, new Writer().string(1, "control").finish()).finish();
-	const frames = splitServerMessage(payload);
-	assert.equal(frames.length, 1, "the arm must appear");
-	assert.equal(frames[0].kind, "unknown");
-	assert.equal(frames[0].field, 5, "with the field number that identifies it");
-});
-
-test("every declared arm round-trips through the splitter", () => {
-	// 5, 7 and 8 are real arms in Cursor's own schema; 1-4 are the ones we act on.
+	// diagnosed with this true, which makes the diagnosis worthless. Arm 8
+	// (ttft_breakdown) arrives on every run and had never been seen.
 	const arms = [
 		[1, "interaction"],
 		[2, "exec"],
 		[3, "checkpoint"],
 		[4, "kv"],
-		[5, "unknown"],
-		[7, "unknown"],
-		[8, "unknown"],
+		[5, "abort"],
+		[7, "query"],
+		[8, "ttft"],
 	];
 	for (const [field, kind] of arms) {
 		const payload = new Writer().message(field, new Writer().varint(1, 1).finish()).finish();
@@ -580,6 +574,34 @@ test("every declared arm round-trips through the splitter", () => {
 		assert.equal(frames.length, 1, `arm ${field} must produce a frame`);
 		assert.equal(frames[0].kind, kind, `arm ${field} maps to ${kind}`);
 	}
+});
+
+test("a genuinely unknown arm is still surfaced with its field number", () => {
+	// Arms beyond the declared seven must not regress to silence.
+	const payload = new Writer().message(12, new Writer().varint(1, 1).finish()).finish();
+	const frames = splitServerMessage(payload);
+	assert.equal(frames.length, 1);
+	assert.equal(frames[0].kind, "unknown");
+	assert.equal(frames[0].field, 12);
+});
+
+test("arm 8 decodes as timing telemetry", () => {
+	// TtftBreakdown|1 server_first_token_ms 1|2 pre_stream_setup_ms 1|3 wait_for_first_event_ms 1
+	//   |4 provider_ttft_ms 1?|5 slow_pool_wait_ms 1 — informational, no reply needed.
+	const bytes = new Writer().double(1, 412.5).double(2, 88.25).double(4, 380.1).finish();
+	const ttft = decodeTtftBreakdown(bytes);
+	assert.equal(ttft.serverFirstTokenMs, 412.5);
+	assert.equal(ttft.preStreamSetupMs, 88.25);
+	assert.equal(ttft.providerTtftMs, 380.1);
+});
+
+test("arm 7 identifies the query kind the server is asking", () => {
+	// InteractionQuery|1 id 13|2 web_search_request|3 ask_question|... — an
+	// InteractionResponse exists, so an unanswered one may stall a run.
+	const bytes = new Writer().varint(1, 7).message(3, new Writer().string(1, "which?").finish()).finish();
+	const query = decodeInteractionQuery(bytes);
+	assert.equal(query.id, 7);
+	assert.equal(query.kind, "ask_question");
 });
 
 test("an undecoded arm is counted and reported, so silence is never mistaken for health", async () => {

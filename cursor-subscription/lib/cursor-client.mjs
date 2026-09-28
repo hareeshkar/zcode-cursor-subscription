@@ -69,19 +69,6 @@ export function encodeAssistantStep(text) {
 	return new Writer().message(1, encodeAssistantMessage(text)).finish();
 }
 
-/** AgentConversationTurnStructure { user_message = 1, steps = 2 } */
-export function encodeAgentTurn(userBytes, stepBytes) {
-	const writer = new Writer();
-	if (userBytes.length > 0) writer.bytes(1, userBytes);
-	for (const step of stepBytes) writer.bytes(2, step);
-	return writer.finish();
-}
-
-/** ConversationTurnStructure { agent_conversation_turn = 1 } */
-export function encodeTurnStructure(turnBytes) {
-	return new Writer().message(1, turnBytes).finish();
-}
-
 /** ModelDetails { model_id = 1, display_model_id = 3, display_name = 4 } */
 export function encodeModelDetails(modelId) {
 	const writer = new Writer();
@@ -91,6 +78,33 @@ export function encodeModelDetails(modelId) {
 	return writer.finish();
 }
 
+
+/**
+ * AgentConversationTurnStructure — the shape ConversationState.turns references.
+ *
+ *   AgentConversationTurnStructure|1 user_message 12|2 steps 12*|3 request_id 9?
+ *     |4 encrypted_model 9?|5 dynamic_tool_count 13?|6 send_message_step_indices 13*
+ *     |7 routed_model_display_name 9?|8 subagent_dispatch_steps #0*
+ *     |9 dynamic_tool_names 9*|10 user_message_id 9?
+ *
+ * The `12`s matter: user_message and steps are bytes, and the reference
+ * implementation's warning — "current Cursor servers treat them as blob ids" —
+ * plus 32-byte ids observed inside real checkpoints say a turn is published to
+ * the blob store and referenced by id, exactly as the root prompt is.
+ */
+export function encodeAgentTurn({ userMessage, steps = [], requestId, userMessageId } = {}) {
+	const writer = new Writer();
+	if (userMessage) writer.bytes(1, userMessage);
+	for (const step of steps) writer.bytes(2, step);
+	if (requestId) writer.string(3, requestId);
+	if (userMessageId) writer.string(10, userMessageId);
+	return writer.finish();
+}
+
+/** ConversationTurnStructure { agent_conversation_turn = 1 }. */
+export function encodeConversationTurn(agentTurnBytes) {
+	return new Writer().message(1, agentTurnBytes).finish();
+}
 // ---------------------------------------------------------------------------
 // Native conversation history
 //
@@ -727,6 +741,9 @@ export function splitServerMessage(payload) {
 			else if (field === 2) out.push({ kind: "exec", payload: inner });
 			else if (field === 3) out.push({ kind: "checkpoint", payload: inner });
 			else if (field === 4) out.push({ kind: "kv", payload: inner });
+			else if (field === 5) out.push({ kind: "abort", payload: inner });
+			else if (field === 7) out.push({ kind: "query", payload: inner });
+			else if (field === 8) out.push({ kind: "ttft", payload: inner });
 			else out.push({ kind: "unknown", field, payload: inner });
 		}
 	} catch {
@@ -745,6 +762,89 @@ export function describeServerFrame(frame) {
 	} catch {
 		return "unreadable";
 	}
+}
+
+
+// ---------------------------------------------------------------------------
+// The remaining AgentServerMessage arms
+//
+//   5 exec_server_control_message #2  → ExecServerControlMessage{abort}
+//   7 interaction_query #5            → server-initiated query; InteractionResponse
+//                                        exists, so an unanswered one may stall a run
+//   8 ttft_breakdown #6               → timing telemetry; informational, no reply
+// ---------------------------------------------------------------------------
+
+/** TtftBreakdown — timing metrics the server reports after a run. Informational. */
+export function decodeTtftBreakdown(bytes) {
+	const reader = new Reader(bytes);
+	const out = {};
+	// TtftBreakdown|1 server_first_token_ms 1|2 pre_stream_setup_ms 1
+	//   |3 wait_for_first_event_ms 1|4 provider_ttft_ms 1?|5 slow_pool_wait_ms 1
+	// (the trailing `1` is Cursor's marker for a fixed64 double)
+	const names = new Map([
+		[1, "serverFirstTokenMs"],
+		[2, "preStreamSetupMs"],
+		[3, "waitForFirstEventMs"],
+		[4, "providerTtftMs"],
+		[5, "slowPoolWaitMs"],
+	]);
+	while (!reader.done) {
+		const { field, wireType } = reader.tag();
+		if (wireType === 1) {
+			const value = reader.double();
+			const name = names.get(field);
+			if (name) out[name] = value;
+		} else {
+			reader.skip(wireType);
+		}
+	}
+	return out;
+}
+
+/** ExecServerControlMessage { abort = 1 }. */
+export function decodeExecServerControl(bytes) {
+	const reader = new Reader(bytes);
+	while (!reader.done) {
+		const { field, wireType } = reader.tag();
+		if (field === 1 && wireType === 2) return { aborted: true, payload: reader.bytes() };
+		if (wireType === 2) reader.bytes();
+		else reader.skip(wireType);
+	}
+	return { aborted: false };
+}
+
+/**
+ * InteractionQuery — the server asking the client for something. An
+ * `InteractionResponse` counterpart exists, so these belong to the family that
+ * expects a reply; an unanswered one may be the same stall the exec refusal was.
+ */
+export function decodeInteractionQuery(bytes) {
+	const reader = new Reader(bytes);
+	const out = { id: 0, kind: "unknown" };
+	const kinds = new Map([
+		[2, "web_search_request"],
+		[3, "ask_question"],
+		[4, "switch_mode"],
+		[7, "create_plan"],
+		[8, "setup_vm_environment"],
+		[9, "web_fetch"],
+		[10, "pr_management"],
+		[11, "mcp_auth"],
+		[12, "generate_image"],
+		[13, "replace_env"],
+		[14, "connect_scm"],
+	]);
+	while (!reader.done) {
+		const { field, wireType } = reader.tag();
+		if (field === 1 && wireType === 0) out.id = reader.varint();
+		else if (wireType === 2) {
+			const payload = reader.bytes();
+			const kind = kinds.get(field);
+			if (kind) out.kind = kind;
+			void payload;
+		} else reader.skip(wireType);
+	}
+	return out;
 }
 
 // ---------------------------------------------------------------------------

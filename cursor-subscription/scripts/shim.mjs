@@ -83,7 +83,7 @@ process.stderr.write(
 		`cursor-subscription: ${status.authenticated ? "signed in" : "not signed in — run cursor_login"}\n` +
 		// Printed because a live run's behaviour is uninterpretable without knowing
 		// which path it took.
-		`cursor-subscription: history=${config.structuredHistory ? "structured" : "text-transcript"} ` +
+		`cursor-subscription: history=${config.turnsInState ? "turns-in-state" : config.structuredHistory ? "structured" : "text-transcript"} ` +
 		`client=${CURSOR_CLIENT_VERSION}\n`,
 );
 

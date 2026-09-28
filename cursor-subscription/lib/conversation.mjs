@@ -40,7 +40,10 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import {
+	encodeAgentTurn,
+	encodeAssistantStep,
 	encodeConversationState,
+	encodeConversationTurn,
 	encodeHistoryAssistant,
 	encodeHistoryTool,
 	encodeHistoryUser,
@@ -289,10 +292,52 @@ export function buildColdStart(messages, extraSystem = "") {
  * @param {string} input.model     the Cursor model id.
  * @returns {Uint8Array} an `AgentClientMessage`.
  */
-export function buildRunRequest({ messages, checkpoint, blobStore, model, extraSystem = "", mcpTools = [], structuredHistory = false }) {
+export function buildRunRequest({ messages, checkpoint, blobStore, model, extraSystem = "", mcpTools = [], structuredHistory = false, turnsInState = false }) {
 	let conversationState;
 	let actionText;
 	let images;
+
+	if (turnsInState && checkpoint === undefined) {
+		// The literal experiment: prior turns in ConversationState.turns as
+		// blob-published ids (the reference warns hand-encoded turns are treated as
+		// blob ids, and real checkpoints carry 32-byte ids there), with
+		// UserMessageAction.conversation_history left EMPTY. Nothing else varies.
+		const prior = buildStructuredHistory(messages);
+		void prior;
+		const cold = buildColdStart(messages, extraSystem);
+		conversationState = cold.conversationState;
+		if (blobStore) {
+			for (const [key, value] of cold.blobStore) blobStore.set(key, value);
+		}
+		actionText = cold.lastUser;
+		images = lastUserMessage(messages).images;
+		const turnIds = [];
+		for (let i = 0; i < messages.length - 1; i += 1) {
+			const message = messages[i];
+			if (message?.role !== "user") continue;
+			const next = messages[i + 1];
+			if (next?.role !== "assistant") continue;
+			const userBytes = encodeUserMessage({ text: String(message.content ?? ""), messageId: randomUUID() });
+			const assistantStep = encodeAssistantStep(String(next.content ?? ""));
+			const turn = encodeConversationTurn(encodeAgentTurn({ userMessage: userBytes, steps: [assistantStep] }));
+			// Publish the turn as a blob and reference it by id — the way the root
+			// prompt already travels.
+			const id = new Uint8Array(createHash("sha256").update(turn).digest());
+			if (blobStore) blobStore.set(Buffer.from(id).toString("hex"), turn);
+			turnIds.push(id);
+		}
+		return encodeRunRequest({
+			conversationState: encodeConversationState({
+				rootPromptBlobIds: [...(cold.conversationState ? [] : [])],
+				turns: turnIds,
+			}),
+			action: encodeUserMessageAction(encodeUserMessage({ text: actionText, messageId: randomUUID() }), []),
+			modelDetails: encodeModelDetails(model),
+			conversationId: randomUUID(),
+			mcpTools,
+			clientSupportsInlineImages: images.length > 0,
+		});
+	}
 
 	if (structuredHistory && checkpoint === undefined) {
 		// Prior turns travel as native messages rather than as a transcript inside

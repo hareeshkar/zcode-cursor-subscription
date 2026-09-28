@@ -241,6 +241,35 @@ Three other silent-but-fatal paths were found alongside it, all now counted and 
 The effective mode is now printed at startup, because a recorded stall cannot be
 attributed to a path without it.
 
+### The literal experiment: turns in state are ignored
+
+With the instrument fixed, the control/test pair the withdrawn diagnosis called
+for was run — the only test that separates "dropped" from "held":
+
+| Run | Where the pair travelled | Result |
+|---|---|---|
+| CONTROL | text transcript in the action | **"Alice"** recalled, 8.0 s |
+| TEST | `ConversationState.turns`, blob-published ids, field 7 empty | **no memory of Alice** — the model replied *"I'll look for your name in workspace settings or profile files"* |
+
+The turns were encoded as `ConversationTurnStructure{agent_conversation_turn}` with
+the user message and assistant step inside, SHA-256-hashed, published to the blob
+store exactly as the root prompt travels, and referenced by id — matching the
+reference's warning that "current Cursor servers treat them as blob ids" and the
+32-byte ids observed inside real checkpoints.
+
+**The server ignored them.** The model's answer is unambiguous: it tried to *search*
+for the name, which means the prior turns never reached its context. The test run
+also never closed cleanly — no `finish_reason`, no `[DONE]`, and 2-byte interaction
+frames continuing after the checkpoint — because the model, having no tools
+registered, kept trying to look the answer up.
+
+So both candidate locations for native history are now measured, not assumed:
+
+| Location | Result |
+|---|---|
+| `UserMessageAction.conversation_history` (field 7) | all seven shapes replied, HTTP 200, 4–6.5 s; canary recalled in the text cases |
+| `ConversationState.turns` (blob-published ids) | **ignored** — no recall, model unaware of prior turns |
+
 **The undecoded arms are counted, not fixed.** Whether arm 8 needs a reply is unknown;
 what is known is that its absence from every previous diagnosis was an assumption nobody
 had checked.
@@ -262,6 +291,8 @@ had checked.
 | Cursor's own built-in execs are answered, not ignored | every known case carries its field; `read_file` returns in 7 s instead of hanging |
 | Usage carries Cursor's real token count | 10,851 first turn, 10,952 resumed — was 0 forever |
 | Every turn anchors, and a resume engages | `conversations: 1` then `resumed: 1, resumeRate: 0.5` |
+| ConversationState.turns (blob form) is ignored by the server | control recalled Alice; the turns run answered "I'll look for your name in workspace settings" |
+| Arm 8 is TTFT telemetry and arrives on every run | decoded live: server/provider first-token timings |
 | No malformed input wedges the shim | 12 malformed requests, then a real completion still answers `PONG` |
 | Client errors are 4xx, not 5xx | bad JSON → `400 bad_json`; missing messages → `400 no_messages` |
 | A refusal loop cannot hang | bounded by `MAX_EXECS_PER_RUN` / `MAX_REFUSALS_PER_FIELD` |
