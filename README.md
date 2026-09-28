@@ -77,22 +77,117 @@ sequenceDiagram
 
 ## Install
 
-**1. Add this repository as a plugin marketplace**
+This plugin is **not on the official ZCode plugin marketplace.** ZCode's marketplace system takes a
+*directory* of plugins, so you clone this repository and register it as your own marketplace. Nothing
+is published to a shared registry, and installing makes no network call.
 
-ZCode → Plugin Marketplace → Add → Add Plugin Marketplace, then paste the repository root (the folder
-containing `marketplace.json`).
+**Prerequisites**
 
-**2. Install *Cursor Subscription*** from that marketplace. Nothing happens yet — no network call is
-made on install.
+| | |
+|---|---|
+| ZCode | 3.14.3 or newer |
+| Node | 20 or newer (the plugin uses `node:sqlite` to read Cursor's local session) |
+| Cursor | Signed in on this machine — the plugin adopts that session rather than signing in again |
+| Git | to clone |
 
-**3. Run one command**
+### 1. Clone
+
+```sh
+git clone https://github.com/hareeshkar/zcode-cursor-subscription.git
+cd zcode-cursor-subscription
+```
+
+Keep the folder. It becomes the marketplace ZCode reads from, and it has to stay where you put it.
+
+### 2. Register it as a marketplace
+
+In ZCode: **Plugin Marketplace → Add → Add Plugin Marketplace**, then paste the **absolute path to the
+folder you just cloned** — the one containing `marketplace.json`:
+
+```
+/absolute/path/to/zcode-cursor-subscription
+```
+
+> Paste the folder itself, not the `marketplace.json` inside it, and not the `cursor-subscription`
+> subfolder.
+
+It appears under **Your marketplaces**. If the list is empty, the path is wrong — ZCode resolves the
+path literally, so a typo fails silently.
+
+### 3. Install the plugin
+
+Open that marketplace and install **Cursor Subscription**. Nothing happens yet: no network call, no
+browser, no credential is read. The install just copies files into
+`~/.zcode/cli/plugins/cache/`.
+
+### 4. Connect
 
 ```
 /connect-cursor-and-initialize
 ```
 
-It adopts your Cursor session, proves it can answer, creates the provider, and publishes every model
-your account can use. Then quit ZCode (⌘Q) and reopen it so the picker picks the list up.
+One call, which:
+
+1. reads the Cursor session from
+   `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` and **verifies it against
+   Cursor before storing it**
+2. sends a real completion on a few cheap models to prove the transport works
+3. creates the provider entry in ZCode's config, writing it atomically
+4. publishes every model your account can use
+
+It stops and tells you why at any step it cannot complete, without writing a half-configured provider.
+
+### 5. Restart and pick a model
+
+Quit ZCode completely — **⌘Q, not just closing the window** — and reopen it. The model picker reads
+the provider config at startup, so the models will not appear until you do.
+
+Then choose any model from the **Cursor Subscription** provider. It behaves like every other model:
+your tools, your permission prompts, ZCode's context management.
+
+## Verifying the installation
+
+```
+/cursor-status
+```
+
+Reports the account, token expiry, the port the shim is serving, and the resume rate. If the shim is
+not answering, `cursor_doctor` names the disagreement between the session, the shim and the provider
+entry.
+
+## Running it from source
+
+Useful while changing the plugin. The MCP server starts the shim automatically, so this is only for
+checking the port and key by hand:
+
+```sh
+cd cursor-subscription
+
+# Start the shim standalone. It prints the API key it generated.
+CURSOR_SHIM_KEY=some-local-key node scripts/shim.mjs --port 8477
+
+# In another shell:
+curl -H "Authorization: Bearer some-local-key" http://127.0.0.1:8477/v1/models
+```
+
+Tests — no dependencies, no build step:
+
+```sh
+node --test "test/*.test.mjs"
+```
+
+After editing the plugin locally, reinstall it from the marketplace (remove, then install again) so
+ZCode copies the new files, then restart. There is no hot reload.
+
+## Troubleshooting the install
+
+| Symptom | Cause |
+|---|---|
+| Marketplace is empty | Wrong path pasted. It must be the folder containing `marketplace.json` |
+| `/connect-cursor-and-initialize` is not offered | The plugin was installed in a running session; MCP tools load at startup. Restart ZCode |
+| `cursor_import` reports no session | Cursor is installed but not signed in — open Cursor and sign in there, then retry |
+| Provider 401 | The API key in ZCode and the shim's key disagree. `cursor_doctor` will say so |
+| Connection refused | Nothing is serving the port. `cursor_doctor` reports the actual state rather than guessing |
 
 ## What is actually new here
 
@@ -129,15 +224,6 @@ cursor-subscription/
   scripts/                           MCP server and standalone shim entry points
   test/                              63 tests, `node --test`
 ```
-
-## Development
-
-```sh
-cd cursor-subscription
-node --test "test/*.test.mjs"
-```
-
-No dependencies, no build step. Node 20+ (it uses `node:sqlite` to read Cursor's local session).
 
 ## Safety
 
