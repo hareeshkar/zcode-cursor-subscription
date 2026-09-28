@@ -64,6 +64,17 @@ export const TOOL_REJECT_REASON =
 export const SHIM_SERVICE = "cursor-subscription-shim";
 
 /**
+ * Whether prior turns travel as Cursor's native history messages or as a text
+ * transcript in the action.
+ *
+ * Native is the correct data model — a tool call stays a call, with its id, name
+ * and arguments, instead of becoming a sentence the model must interpret. It is
+ * opt-in until it has been proven against the real server, because the transcript
+ * path is the one whose behaviour is understood end to end.
+ */
+const STRUCTURED_HISTORY = process.env.CURSOR_STRUCTURED_HISTORY === "1";
+
+/**
  * Ceilings on exec traffic within a single run.
  *
  * Refusing an exec and continuing is a loop unless something bounds it. A model
@@ -704,6 +715,9 @@ export class CursorShim {
 			// own client sends them here; the exec path alone is a round-trip it
 			// does not need.
 			mcpTools: encodedTools,
+			// Opt-in until proven against the real server. The text transcript is the
+			// fallback: fewer moving parts, and its behaviour is understood.
+			structuredHistory: STRUCTURED_HISTORY,
 		});
 
 		const run = { toolNames, model, messages, blobStore, conversationId };

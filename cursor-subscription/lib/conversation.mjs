@@ -41,10 +41,14 @@ import { createHash, randomUUID } from "node:crypto";
 
 import {
 	encodeConversationState,
+	encodeHistoryAssistant,
+	encodeHistoryTool,
+	encodeHistoryUser,
 	encodeModelDetails,
 	encodeRunRequest,
 	encodeUserMessage,
 	encodeUserMessageAction,
+	encodeUserMessageActionWithHistory,
 } from "./cursor-client.mjs";
 
 /** Flatten OpenAI content (string or parts) into text plus data-URL images. */
@@ -110,6 +114,80 @@ function coldStartLabel(message) {
 		return name.length > 0 ? `TOOL RESULT (${name})` : "TOOL RESULT";
 	}
 	return "USER";
+}
+
+
+/**
+ * Convert host messages into Cursor's native history messages.
+ *
+ * The alternative — and what this replaces — is to flatten everything into a
+ * labelled text transcript inside the action. That is lossy in a way that
+ * matters: a tool call becomes a sentence the model must interpret rather than a
+ * call it can recognise, reasoning is dropped, and the call/result pairing is
+ * inferred from adjacency instead of carried by an id.
+ *
+ * Returns prepared `ConversationHistoryMessage` bytes, skipping the system
+ * prompt (published as a blob) and the newest user turn (which is the action).
+ *
+ * @param {Array} messages the host's OpenAI message array.
+ * @param {object} [options]
+ * @param {number} [options.until] index to stop before; defaults to the newest user turn.
+ */
+export function buildStructuredHistory(messages, { until } = {}) {
+	const cutoff = until ?? lastUserIndex(messages);
+	const history = [];
+	if (cutoff <= 0) return history;
+
+	for (let i = 0; i < cutoff; i += 1) {
+		const message = messages[i];
+		const role = message?.role;
+		if (role === "system" || role === "developer") continue;
+
+		if (role === "user") {
+			const { text, images } = flattenContent(message.content);
+			if (text.trim().length === 0 && images.length === 0) continue;
+			history.push(encodeHistoryUser({ text: text.trim(), images }));
+			continue;
+		}
+
+		if (role === "assistant") {
+			const { text } = flattenContent(message.content);
+			const calls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+			const toolCalls = calls
+				.map((call) => ({
+					toolCallId: typeof call?.id === "string" ? call.id : "",
+					toolName: typeof call?.function?.name === "string" ? call.function.name : "",
+					argsJson: typeof call?.function?.arguments === "string" ? call.function.arguments : "{}",
+				}))
+				.filter((call) => call.toolName.length > 0);
+			// Reasoning is not carried by the host's message shape; it stays empty
+			// rather than being invented.
+			if (text.trim().length === 0 && toolCalls.length === 0) continue;
+			history.push(encodeHistoryAssistant({ text: text.trim(), toolCalls }));
+			continue;
+		}
+
+		if (role === "tool") {
+			const { text } = flattenContent(message.content);
+			history.push(
+				encodeHistoryTool({
+					toolCallId: typeof message.tool_call_id === "string" ? message.tool_call_id : "",
+					toolName: typeof message.tool_name === "string" ? message.tool_name : "",
+					text,
+					isError: message.is_error === true,
+				}),
+			);
+		}
+	}
+	return history;
+}
+
+/** Index of the newest user message, or -1. */
+function lastUserIndex(messages) {
+	for (let i = messages.length - 1; i >= 0; i -= 1) {
+		if (messages[i]?.role === "user") return i;
+	}
+	return -1;
 }
 
 /**
@@ -211,10 +289,34 @@ export function buildColdStart(messages, extraSystem = "") {
  * @param {string} input.model     the Cursor model id.
  * @returns {Uint8Array} an `AgentClientMessage`.
  */
-export function buildRunRequest({ messages, checkpoint, blobStore, model, extraSystem = "", mcpTools = [] }) {
+export function buildRunRequest({ messages, checkpoint, blobStore, model, extraSystem = "", mcpTools = [], structuredHistory = false }) {
 	let conversationState;
 	let actionText;
 	let images;
+
+	if (structuredHistory && checkpoint === undefined) {
+		// Prior turns travel as native messages rather than as a transcript inside
+		// the action, and the action carries only the newest user turn.
+		const history = buildStructuredHistory(messages);
+		const cold = buildColdStart(messages, extraSystem);
+		conversationState = cold.conversationState;
+		if (blobStore) {
+			for (const [key, value] of cold.blobStore) blobStore.set(key, value);
+		}
+		actionText = cold.lastUser;
+		images = lastUserMessage(messages).images;
+		return encodeRunRequest({
+			conversationState,
+			action: encodeUserMessageActionWithHistory(
+				encodeUserMessage({ text: actionText, messageId: randomUUID() }),
+				history,
+			),
+			modelDetails: encodeModelDetails(model),
+			conversationId: randomUUID(),
+			mcpTools,
+			clientSupportsInlineImages: images.length > 0,
+		});
+	}
 
 	if (checkpoint !== undefined) {
 		conversationState = checkpoint;

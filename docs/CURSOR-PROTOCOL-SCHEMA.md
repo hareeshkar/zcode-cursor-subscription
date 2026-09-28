@@ -247,11 +247,28 @@ model that does declare image support would get it automatically.
 | `AvailableModel` capabilities | now decoded: `supports_images`, `supports_thinking`, `context_token_limit`, `client_display_name`. All read `false`/absent live, so image support is genuinely unavailable on this endpoint |
 | `input_schema_json` (field 6) | now sent alongside the Value encoding |
 | `token_details` path | confirmed; decoder fixed to read it |
-| Structured history family | documented, encoders exported, **not yet used** |
+| Structured history family | **Implemented** — encoders for every message, `buildStructuredHistory`, verified at the byte level. The server stalls on it (see below), so it is opt-in and off |
 | `custom_system_prompt` | documented, not adopted (the blob path is proven) |
 | `thinking_details` | exists, has no fields, not sent |
 
 ---
+
+## Structured history: implemented, and refused by the server
+
+The encoders are in `lib/cursor-client.mjs` and the mapping in
+`buildConversation`/`buildStructuredHistory`. `CURSOR_STRUCTURED_HISTORY=1`
+enables it. It is off because it was measured:
+
+| Sent | Result |
+|---|---|
+| Text transcript in the action | reply in 4.5 s |
+| Structured history with a tool call | no response in 120 s |
+| Structured history, plain text only | no response in 90 s |
+
+Plain text in that field stalls just as hard, so it is not an encoding mistake —
+populating `UserMessageAction.conversation_history` with structured messages is
+what the server will not take. Untested next step: whether it needs
+`replace_user_info` set, or the history declared in `conversation_state` instead.
 
 ## Reproducing this
 

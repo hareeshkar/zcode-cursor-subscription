@@ -157,6 +157,49 @@ cannot be lost one level down.
 
 ---
 
+### The native history path: built, verified, and not adopted
+
+The typed history family is the right data model — a tool call should stay a call
+with an id, a name and parsed arguments, not become a sentence the model has to
+interpret. So it was implemented.
+
+Encoders exist for every message in the family, `buildStructuredHistory` maps the
+host's messages onto them, and the split was verified at the byte level:
+
+```
+TEXT-ONLY    action = "Continue the conversation below…"   history = none
+STRUCTURED   action = "what port?"                          history = 125B
+             └── containing the tool call and its arguments
+```
+
+That is exactly the shape intended: the action carries only the newest turn, and
+the prior turns travel as native messages. A test walking the encoded bytes also
+caught a real bug in the tool encoder — `ConversationHistoryMessage.tool = 3` was
+nested one level too deep, inside field 1, so the wire would have carried a
+message whose tool slot was empty.
+
+**Then it was measured against the real server, and it stalls.**
+
+| Sent | Result |
+|---|---|
+| Text transcript in the action | reply in 4.5 s, canary recalled |
+| Structured history, with a tool call | no response in 120 s |
+| Structured history, **plain text only** | no response in 90 s |
+
+The third row is the decisive one: it is not the tool-call encoding, and not the
+content at all. Populating `UserMessageAction.conversation_history` with
+structured messages stalls the run, whether or not it contains anything exotic.
+That is consistent with the image behaviour, which populates the same field.
+
+So the native path is **opt-in and off** (`CURSOR_STRUCTURED_HISTORY=1`). It is
+correct, tested, and documented; it is not shipped as the default, because the
+server does not accept it. What remains unknown is whether it needs a companion
+field — `replace_user_info`, or state the `conversation_state` normally carries —
+or whether this endpoint simply does not want history on the action. That is the
+next thing to try, and it needs captures rather than guesses.
+
+---
+
 ## 2. Proven
 
 | Claim | Evidence |

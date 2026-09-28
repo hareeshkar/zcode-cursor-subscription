@@ -91,26 +91,127 @@ export function encodeModelDetails(modelId) {
 	return writer.finish();
 }
 
-/** ConversationHistoryImageContent { data = 1, mime_type = 2 } */
-function encodeConversationHistoryImage({ data, mimeType }) {
-	const image = new Writer().string(1, data);
-	if (mimeType) image.string(2, mimeType);
-	const content = new Writer().message(2, image.finish()).finish();
-	const user = new Writer().message(1, content).finish();
+// ---------------------------------------------------------------------------
+// Native conversation history
+//
+// Cursor's own schema, from its client bundle:
+//
+//   ConversationHistory         |1 messages #0*|2 replace_user_info 8?
+//   ConversationHistoryMessage  |1 user #0|2 assistant #1|3 tool #2
+//   ConversationHistoryUserMessage      |1 content #0*
+//   ConversationHistoryAssistantMessage |1 content #0*
+//   ConversationHistoryToolMessage      |1 tool_call_id 9|2 tool_name 9
+//                                       |3 content #0*|4 is_error 8?
+//   ConversationHistoryUserContent      |1 text #0|2 image #1
+//   ConversationHistoryAssistantContent |1 text #0|2 reasoning #1
+//                                       |3 redacted_reasoning #2|4 tool_call #3
+//   ConversationHistoryToolResultContent|1 text #0|2 image #1
+//   ConversationHistoryTextContent      |1 text 9
+//   ConversationHistoryImageContent     |1 data 9|2 mime_type 9?
+//   ConversationHistoryReasoningContent |1 text 9|2 signature 9?
+//   ConversationHistoryToolCall         |1 tool_call_id 9|2 tool_name 9|3 args_json 9
+//
+// The `#n` markers are nested *type* indices, not field numbers. Each content
+// kind is a oneof arm carrying its own field number, and the arms are repeated,
+// so one assistant message can hold text, reasoning and several tool calls.
+// ---------------------------------------------------------------------------
+
+/** One content arm of a user message: `{ text }` or `{ image: {data, mimeType} }`. */
+function encodeUserContent(part) {
+	if (part?.image) {
+		const image = new Writer().string(1, part.image.data);
+		if (part.image.mimeType) image.string(2, part.image.mimeType);
+		return new Writer().message(2, image.finish()).finish();
+	}
+	return new Writer().message(1, new Writer().string(1, String(part?.text ?? "")).finish()).finish();
+}
+
+/** One content arm of a tool result: text or image. */
+function encodeToolResultContent(part) {
+	if (part?.image) {
+		const image = new Writer().string(1, part.image.data);
+		if (part.image.mimeType) image.string(2, part.image.mimeType);
+		return new Writer().message(2, image.finish()).finish();
+	}
+	return new Writer().message(1, new Writer().string(1, String(part?.text ?? "")).finish()).finish();
+}
+
+/** One content arm of an assistant message: text, reasoning or a tool call. */
+function encodeAssistantContent(part) {
+	if (part?.toolCall) {
+		const call = new Writer().string(1, part.toolCall.toolCallId ?? "");
+		if (part.toolCall.toolName) call.string(2, part.toolCall.toolName);
+		call.string(3, part.toolCall.argsJson ?? "{}");
+		return new Writer().message(4, call.finish()).finish();
+	}
+	if (part?.reasoning) {
+		return new Writer().message(2, new Writer().string(1, part.reasoning).finish()).finish();
+	}
+	return new Writer().message(1, new Writer().string(1, String(part?.text ?? "")).finish()).finish();
+}
+
+/** ConversationHistoryMessage carrying a user turn. */
+export function encodeHistoryUser({ text = "", images = [] } = {}) {
+	const content = new Writer();
+	if (text.length > 0) content.message(1, encodeUserContent({ text }));
+	for (const image of images) content.message(1, encodeUserContent({ image }));
+	const user = new Writer().message(1, content.finish()).finish();
 	return new Writer().message(1, user).finish();
 }
 
-/** ConversationHistory { messages = 1 } */
-function encodeConversationHistory(images) {
+/** ConversationHistoryMessage carrying an assistant turn: text, reasoning, tool calls. */
+export function encodeHistoryAssistant({ text = "", reasoning = "", toolCalls = [] } = {}) {
+	const content = new Writer();
+	if (reasoning.length > 0) content.message(1, encodeAssistantContent({ reasoning }));
+	if (text.length > 0) content.message(1, encodeAssistantContent({ text }));
+	for (const toolCall of toolCalls) content.message(1, encodeAssistantContent({ toolCall }));
+	const assistant = new Writer().message(1, content.finish()).finish();
+	return new Writer().message(2, assistant).finish();
+}
+
+/** ConversationHistoryMessage carrying a tool result. */
+export function encodeHistoryTool({ toolCallId = "", toolName = "", text = "", isError = false, images = [] } = {}) {
+	const message = new Writer().string(1, toolCallId);
+	if (toolName) message.string(2, toolName);
+	const content = new Writer();
+	content.message(1, encodeToolResultContent({ text }));
+	for (const image of images) content.message(1, encodeToolResultContent({ image }));
+	message.message(3, content.finish());
+	if (isError) message.varint(4, 1);
+	// ConversationHistoryMessage.tool = 3, and field 3 holds the tool message
+	// directly. It was nested one level too deep — inside field 1 — so the wire
+	// carried a message whose tool slot was empty. Caught by walking the encoded
+	// bytes in a test rather than by reading the code.
+	return new Writer().message(3, message.finish()).finish();
+}
+
+/** ConversationHistory { messages = 1 } wrapping prepared HistoryMessages. */
+export function encodeConversationHistory(messages) {
 	const writer = new Writer();
-	for (const image of images) writer.message(1, encodeConversationHistoryImage(image));
+	for (const message of messages) writer.message(1, message);
 	return writer.finish();
+}
+
+/** ConversationAction carrying pre-encoded history messages. */
+export function encodeUserMessageActionWithHistory(userBytes, historyMessages = []) {
+	const inner = new Writer().message(1, userBytes);
+	if (historyMessages.length > 0) {
+		inner.message(7, encodeConversationHistory(historyMessages));
+	}
+	return new Writer().message(1, inner.finish()).finish();
 }
 
 /** ConversationAction { user_message_action = 1 } */
 export function encodeUserMessageAction(userBytes, images = []) {
 	const inner = new Writer().message(1, userBytes);
-	if (images.length > 0) inner.message(7, encodeConversationHistory(images));
+	if (images.length > 0) {
+		// The image-only path predates structured history and is kept for it.
+		const history = new Writer();
+		for (const image of images) {
+			history.message(1, encodeHistoryUser({ images: [image] }));
+		}
+		inner.message(7, history.finish());
+	}
 	return new Writer().message(1, inner.finish()).finish();
 }
 

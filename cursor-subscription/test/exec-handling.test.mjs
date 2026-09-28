@@ -30,7 +30,15 @@ import { canAnchorTurn, planRequestControls } from "../lib/shim.mjs";
 import { ConversationStore } from "../lib/conversation-store.mjs";
 import { pickProbeModels } from "../lib/selftest.mjs";
 import { Writer, Reader, encodeValue } from "../lib/proto.mjs";
-import { decodeAvailableModel, decodeCheckpointUsedTokens, modelIds, sortModelsByName } from "../lib/cursor-client.mjs";
+import {
+	decodeAvailableModel,
+	decodeCheckpointUsedTokens,
+	encodeHistoryAssistant,
+	encodeHistoryTool,
+	modelIds,
+	sortModelsByName,
+} from "../lib/cursor-client.mjs";
+import { buildStructuredHistory } from "../lib/conversation.mjs";
 
 /** Build an ExecServerMessage exactly as observed on the wire. */
 function execFrame({ id = 1, execId = "", fields = [] }) {
@@ -465,4 +473,78 @@ test("ids and capability objects both sort and register", () => {
 		["a", "b"],
 	);
 	assert.deepEqual(sortModelsByName(["b", "a"]), ["a", "b"], "plain ids still sort");
+});
+
+// --- native history encoding, proven at the wire level ---------------------
+
+/** Walk one level of a protobuf message and return every field's bytes. */
+function fields(buf) {
+	const out = [];
+	const r = new Reader(buf);
+	while (!r.done) {
+		const { field, wireType } = r.tag();
+		if (wireType === 2) out.push([field, r.bytes()]);
+		else if (wireType === 0) out.push([field, r.varint()]);
+		else r.skip(wireType);
+	}
+	return out;
+}
+
+test("a native assistant message carries a tool call with its id, name and arguments", () => {
+	// ConversationHistoryAssistantContent is a oneof: text=1, reasoning=2,
+	// redacted_reasoning=3, tool_call=4 — and it is repeated, so one message can
+	// hold text and several calls.
+	const encoded = encodeHistoryAssistant({
+		text: "Looking.",
+		toolCalls: [{ toolCallId: "call_1", toolName: "read_file", argsJson: '{"path":"/srv/deploy.sh"}' }],
+	});
+	const assistant = fields(encoded).find(([f]) => f === 2)?.[1];
+	assert.ok(assistant, "ConversationHistoryMessage.assistant = 2");
+	// One more level: the assistant message's own field 1 is the content message,
+	// whose repeated field 1 holds the arms.
+	const contentMessage = fields(assistant).find(([f]) => f === 1)?.[1];
+	const content = fields(contentMessage).filter(([f]) => f === 1).map(([, v]) => v);
+	assert.equal(content.length, 2, "two arms: text and the call");
+
+	const arms = content.map((arm) => fields(arm)[0][0]).sort();
+	assert.deepEqual(arms, [1, 4], "text is arm 1, tool_call is arm 4");
+
+	const callArm = content.find((arm) => fields(arm)[0][0] === 4);
+	const call = fields(callArm)[0][1];
+	const parts = Object.fromEntries(fields(call).map(([f, v]) => [f, v instanceof Uint8Array ? new TextDecoder().decode(v) : v]));
+	assert.equal(parts[1], "call_1", "tool_call_id = 1");
+	assert.equal(parts[2], "read_file", "tool_name = 2");
+	assert.equal(parts[3], '{"path":"/srv/deploy.sh"}', "args_json = 3");
+});
+
+test("a native tool result carries the id that pairs it to its call", () => {
+	const encoded = encodeHistoryTool({ toolCallId: "call_1", toolName: "read_file", text: "PORT=8080" });
+	const message = fields(encoded).find(([f]) => f === 3)?.[1];
+	assert.ok(message, "ConversationHistoryMessage.tool = 3");
+	const parts = fields(message);
+	const byField = Object.fromEntries(parts.filter(([, v]) => v instanceof Uint8Array).map(([f, v]) => [f, new TextDecoder().decode(v)]));
+	assert.equal(byField[1], "call_1");
+	assert.equal(byField[2], "read_file");
+});
+
+test("history building keeps the pairing and skips what it should", () => {
+	const messages = [
+		{ role: "system", content: "rules" },
+		{ role: "user", content: "read the script" },
+		{ role: "assistant", content: null, tool_calls: [{ id: "c1", function: { name: "read_file", arguments: "{}" } }] },
+		{ role: "tool", tool_call_id: "c1", tool_name: "read_file", content: "PORT=8080" },
+		{ role: "user", content: "what port?" },
+	];
+	const history = buildStructuredHistory(messages);
+	assert.equal(history.length, 3, "user, assistant and tool — not the system prompt or the newest turn");
+	assert.ok(history.every((h) => h instanceof Uint8Array && h.length > 0));
+});
+
+test("an assistant turn with no text and no calls is skipped, not encoded empty", () => {
+	const history = buildStructuredHistory([
+		{ role: "user", content: "hello" },
+		{ role: "assistant", content: null },
+		{ role: "user", content: "again" },
+	]);
+	assert.equal(history.length, 1, "only the first user turn is worth sending");
 });
