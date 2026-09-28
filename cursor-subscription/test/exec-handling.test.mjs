@@ -318,3 +318,26 @@ test("includeExpensive does not dereference a null rank", () => {
 	assert.equal(withExpensive[0], "composer-2.5-fast", "the cheap family still ranks first");
 	assert.ok(withExpensive.includes("claude-4.5-sonnet"), "and expensive ones sort last rather than vanish");
 });
+
+test("the reasoning and token fields the option map writes are reported, not ignored", () => {
+	// ZCode's built-in option map patches these into the body for
+	// openai-chat-completions. They never appear in the SDK's types, which is
+	// exactly why they are easy to drop silently.
+	const plan = planRequestControls({
+		reasoning_effort: "high",
+		enable_thinking: true,
+		thinking: { type: "enabled" },
+		max_completion_tokens: 8192,
+	});
+	assert.ok(
+		plan.notes.some((n) => n.includes("reasoning selection")),
+		"a reasoning selection must be named as untransmittable",
+	);
+	assert.ok(plan.notes.some((n) => n.includes("max_completion_tokens")));
+});
+
+test("a request with no reasoning selection says nothing about reasoning", () => {
+	// The report must not cry wolf on the common path.
+	const plan = planRequestControls({ model: "m", messages: [] });
+	assert.ok(!plan.notes.some((n) => n.includes("reasoning")));
+});

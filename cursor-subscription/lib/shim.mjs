@@ -137,6 +137,28 @@ export function planRequestControls(body = {}) {
 		if (body[field] !== undefined) notes.push(field + " is not expressible in Cursor's run request");
 	}
 
+	// These are written by ZCode's own option map, not by its SDK: for
+	// openai-chat-completions the built-in `modelApiRules` entry patches the
+	// request body with up to four reasoning fields plus a token cap. They are
+	// easy to miss precisely because they never appear in the SDK's types.
+	//
+	// Cursor's run request has no field for any of them — thinking effort is
+	// carried in the model id itself, which is why the account exposes separate
+	// `-low`/`-high`/`-thinking` variants as distinct models. So a selection made
+	// in ZCode's reasoning picker cannot be transmitted, and saying so is the
+	// only honest option: silently ignoring it would let the user believe they
+	// changed something.
+	const reasoningFields = ["reasoning_effort", "enable_thinking", "reasoning"];
+	if (body.thinking !== undefined || reasoningFields.some((field) => body[field] !== undefined)) {
+		notes.push(
+			"a reasoning selection arrived but Cursor carries effort in the model id, not the request; " +
+				"pick a -low/-high/-thinking model instead",
+		);
+	}
+	if (body.max_completion_tokens !== undefined) {
+		notes.push("max_completion_tokens is not expressible in Cursor's run request");
+	}
+
 	let extraSystem = "";
 	const format = body.response_format;
 	if (format && typeof format === "object") {
