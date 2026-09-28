@@ -21,19 +21,34 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
 
-      # No dependencies and no build step — the plugin is plain ESM on Node's
-      # standard library. Assert that rather than running an install, which
-      # would need a lockfile to mean anything and would fail here anyway.
-      - name: Assert the plugin declares no dependencies
+      # Dev-only tooling: the type-checker. It is not shipped and adds no runtime
+      # dependency, so installing it here does not weaken the promise below.
+      - name: Install dev-only tooling
+        working-directory: cursor-subscription
+        run: npm install --no-audit --no-fund
+
+      # The promise is "no *runtime* dependencies" — plain ESM on Node's standard
+      # library, no build step. A dev-time type-checker is allowed; anything that
+      # would ship is not.
+      - name: Assert no runtime dependencies
         run: |
           node -e '
             const pkg = require("./cursor-subscription/package.json");
-            for (const field of ["dependencies", "devDependencies", "peerDependencies"]) {
+            for (const field of ["dependencies", "peerDependencies", "optionalDependencies"]) {
               const n = Object.keys(pkg[field] ?? {}).length;
               if (n) throw new Error(`expected no ${field}, found ${n}: ${Object.keys(pkg[field]).join(", ")}`);
             }
-            console.log("no dependencies declared");
+            console.log("no runtime dependencies declared");
           '
+
+      # Blocks the defect class that caused three separate bugs here: a value
+      # that can be absent in two ways, written as one and read as the other.
+      # `let toolCall = null` read by `!== undefined` discarded every checkpoint
+      # Cursor ever sent. Only the null-safety codes fail the build; the rest are
+      # a reported burn-down rather than a claim that the code is fully typed.
+      - name: Type-check
+        working-directory: cursor-subscription
+        run: node scripts/typecheck.mjs
 
       - name: Verify the marketplace manifest matches the plugin
         run: |

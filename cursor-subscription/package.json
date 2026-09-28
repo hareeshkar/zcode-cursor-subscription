@@ -16,7 +16,14 @@
   },
   "scripts": {
     "test": "node --test test/*.test.mjs",
+    "typecheck": "node scripts/typecheck.mjs",
     "shim": "node ./scripts/shim.mjs"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "typescript": "^5.9.3"
+  }
 }

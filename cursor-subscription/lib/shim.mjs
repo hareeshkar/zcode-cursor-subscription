@@ -710,7 +710,11 @@ export class CursorShim {
 							onDelta?.({ kind: "reasoning", text: update.text });
 						}
 						else if (update.type === "tokenDelta") {
-							if (Number.isFinite(update.tokens)) completionTokens += update.tokens;
+							// `Number.isFinite` does not narrow `number | undefined`, and a
+							// count that is absent must not be added as though it were a
+							// zero — the host derives its compaction threshold from this.
+							const tokens = update.tokens;
+							if (typeof tokens === "number" && Number.isFinite(tokens)) completionTokens += tokens;
 						}
 					} else if (frame.kind === "checkpoint") {
 						// Field 3 IS the serialized ConversationState. Holding it is what

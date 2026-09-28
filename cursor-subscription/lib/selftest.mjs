@@ -66,10 +66,18 @@ export function pickProbeModels(models, { limit = 6, includeExpensive = false } 
 		return [3, 0, model.length, model];
 	};
 
+	// `rank` returns null for an expensive family, and that null is meaningful —
+	// it means "ranked last". The previous version read `key[i]` straight off it,
+	// so `pickProbeModels([...], { includeExpensive: true })` threw a TypeError
+	// from exported API. The default path never took that branch, which is why it
+	// survived. `null` is now handled explicitly rather than dereferenced.
 	return unique
 		.map((model) => ({ model, key: rank(model) }))
 		.filter((entry) => includeExpensive || entry.key !== null)
 		.sort((a, b) => {
+			if (a.key === null && b.key === null) return 0;
+			if (a.key === null) return 1;
+			if (b.key === null) return -1;
 			for (let i = 0; i < 4; i += 1) {
 				if (a.key[i] !== b.key[i]) return a.key[i] < b.key[i] ? -1 : 1;
 			}

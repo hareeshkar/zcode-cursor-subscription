@@ -28,6 +28,7 @@ import {
 } from "../lib/cursor-client.mjs";
 import { canAnchorTurn, planRequestControls } from "../lib/shim.mjs";
 import { ConversationStore } from "../lib/conversation-store.mjs";
+import { pickProbeModels } from "../lib/selftest.mjs";
 import { Writer, Reader, encodeValue } from "../lib/proto.mjs";
 
 /** Build an ExecServerMessage exactly as observed on the wire. */
@@ -301,4 +302,19 @@ test("an anchored turn is actually retrievable for the next one", () => {
 	assert.ok(found, "an exact extension must find the anchor");
 	assert.equal(found.conversationId, "conv");
 	assert.equal(store.size, 1);
+});
+
+// --- a crash the type-checker found ----------------------------------------
+
+test("includeExpensive does not dereference a null rank", () => {
+	// `rank()` returns null for an expensive family and the old comparator read
+	// `key[i]` off it, so `pickProbeModels([...], { includeExpensive: true })`
+	// threw a TypeError from exported API. Type-checking found it; the default
+	// path never took the branch, so no test had reason to try it.
+	const models = ["claude-4.5-sonnet", "gpt-5.1-low", "composer-2.5-fast"];
+	assert.doesNotThrow(() => pickProbeModels(models, { includeExpensive: true }));
+	const withExpensive = pickProbeModels(models, { includeExpensive: true, limit: 5 });
+	assert.equal(withExpensive.length, 3, "every model is kept when expensive ones are allowed");
+	assert.equal(withExpensive[0], "composer-2.5-fast", "the cheap family still ranks first");
+	assert.ok(withExpensive.includes("claude-4.5-sonnet"), "and expensive ones sort last rather than vanish");
 });
