@@ -145,7 +145,7 @@ export class CursorShim {
 	#preferredPort;
 	#adoptedPort = null;
 	#adoptionTimer;
-	#stats = { turns: 0, resumed: 0, replayed: 0, toolCalls: 0 };
+	#stats = { turns: 0, resumed: 0, replayed: 0, toolCalls: 0, toolRequests: 0, droppedToolCalls: 0 };
 
 	constructor(options = {}) {
 		this.#store = options.store ?? new CredentialStore();
@@ -193,7 +193,7 @@ export class CursorShim {
 	}
 
 	resetMetrics() {
-		this.#stats = { turns: 0, resumed: 0, replayed: 0, toolCalls: 0 };
+		this.#stats = { turns: 0, resumed: 0, replayed: 0, toolCalls: 0, toolRequests: 0, droppedToolCalls: 0 };
 		this.#conversations.clear();
 	}
 
@@ -635,6 +635,7 @@ export class CursorShim {
 							// The one exec that ends the run. Cursor holds its state
 							// server-side, and the next ZCode turn resumes it from the
 							// checkpoint with the tool result attached.
+							this.#stats.toolRequests += 1;
 							toolCall = exec;
 							run.end();
 							break;
@@ -716,7 +717,16 @@ export class CursorShim {
 		if (!exec || exec.case !== "mcpArgs") return null;
 		const { toolName, callId, args } = exec.args ?? {};
 		const name = String(toolName ?? "");
-		if (!name || !toolNames.has(name)) return null;
+		if (!name || !toolNames.has(name)) {
+			// A tool Cursor asked for that we never registered. Returning null here
+			// silently turns the turn into a plain `stop`, which is precisely how
+			// tool calling was invisible for so long. Counting it makes the
+			// divergence between what Cursor asked for and what the host received
+			// something `cursor_doctor` can report.
+			this.#stats.droppedToolCalls += 1;
+			this.log("dropped a tool call for an unregistered tool", name || "(no name)");
+			return null;
+		}
 		return {
 			id: callId || `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
 			type: "function",

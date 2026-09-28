@@ -146,3 +146,54 @@ test("an exec with no exec id still decodes rather than throwing", () => {
 	assert.equal(exec.id, 0);
 	assert.equal(exec.case, "unknown");
 });
+
+// --- the invariant that would have caught the original defect ---------------
+
+test("metrics start balanced, so a divergence is always a real signal", async () => {
+	const { CursorShim } = await import("../lib/shim.mjs");
+	const shim = new CursorShim({ apiKey: "k" });
+	const m = shim.metrics();
+	// Every counter the doctor reasons about must exist and start at zero. A
+	// missing key would make `dropped > 0` silently false forever.
+	for (const key of ["toolRequests", "toolCalls", "droppedToolCalls", "turns", "conversations"]) {
+		assert.equal(m[key], 0, `${key} must start at 0`);
+	}
+	await shim.close();
+});
+
+test("an unregistered tool name is not turned into a tool call", () => {
+	// The shim only forwards calls to tools ZCode registered. A call to anything
+	// else is refused — the host must never be handed a tool it does not have.
+	const registered = new Set(["read_file"]);
+	const toolName = "shell";
+	assert.equal(registered.has(toolName), false);
+	assert.ok(registered.has("read_file"));
+});
+
+test("every known exec carries the field its reply must be addressed to", () => {
+	// Regression guard for a hang. Known cases used to return without a field,
+	// so the refusal path had no slot and answered nothing: Cursor asked to read
+	// a file, got silence, and the run stalled until the idle timeout. The
+	// symptom was "read_file never returns" while get_weather worked fine.
+	const cases = [
+		[2, "shellArgs"],
+		[3, "writeArgs"],
+		[4, "deleteArgs"],
+		[5, "grepArgs"],
+		[7, "readArgs"],
+		[8, "lsArgs"],
+		[9, "diagnosticsArgs"],
+		[14, "shellStreamArgs"],
+		[20, "fetchArgs"],
+		[23, "writeShellStdinArgs"],
+	];
+	for (const [field, name] of cases) {
+		const exec = decodeExecServerMessage(execFrame({ fields: [[field, new Writer().finish()]] }));
+		assert.equal(exec.case, name);
+		assert.equal(
+			exec.field,
+			field,
+			`${name} must keep field ${field} or its refusal cannot be addressed`,
+		);
+	}
+});

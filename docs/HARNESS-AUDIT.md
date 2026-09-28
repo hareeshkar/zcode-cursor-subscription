@@ -71,6 +71,28 @@ A refusal is an `McpResult { error = 2 }` written **on the exec's own field
 number**, because the server routes the reply by that slot. Silence leaves the
 run waiting forever.
 
+### 1b. The second defect, found while fixing the first
+
+Fixing the above immediately exposed a second one, of the same shape and in
+my own new code.
+
+`decodeExecServerMessage` returned the **known** exec variants without their
+field number, keeping it only for `unknown`. The refusal path was guarded by
+`if (typeof exec.field === "number")`, so a `read_args` exec — Cursor's own
+built-in read — was silently left **unanswered**. Cursor waits for every exec
+to be answered, so the run stalled until the idle timeout and the request
+returned nothing at all.
+
+The symptom was sharp and misleading: `get_weather` worked, `read_file` hung.
+The model, asked to read a file, chose Cursor's built-in read tool; we had no
+reply slot for it; nothing was sent; the run waited forever.
+
+Every known case now carries its own field, so any exec can be answered on the
+slot the server will read it from, and a per-exec rejection table is no longer
+needed for correctness. The lesson is the same one as §1: **a message that is
+not answered is not a message that was handled.** The guard I added to make the
+refusal path safe turned it into a silent one.
+
 ---
 
 ## 2. Proven
@@ -85,6 +107,7 @@ run waiting forever.
 | The system prompt survives tool turns | a one-sentence instruction set at turn 1 still holds at turn 3 |
 | Tool calls survive streaming | 18 SSE frames, all with `choices`; `finish_reason: "tool_calls"` on a populated frame |
 | A tool result is never dropped on a resumed turn | the interlock refuses to resume; the replay carries it as `[TOOL RESULT]` |
+| Cursor's own built-in execs are answered, not ignored | every known case carries its field; `read_file` returns in 7 s instead of hanging |
 | No malformed input wedges the shim | 12 malformed requests, then a real completion still answers `PONG` |
 | Client errors are 4xx, not 5xx | bad JSON → `400 bad_json`; missing messages → `400 no_messages` |
 | A refusal loop cannot hang | bounded by `MAX_EXECS_PER_RUN` / `MAX_REFUSALS_PER_FIELD` |
@@ -145,6 +168,11 @@ tests, so the guarantee cannot rot silently — which is the whole lesson of §1
 6. **No circuit breaker on repeated upstream failure.** A transient `api2.cursor.sh`
    error should surface as a clean error to the host, not as N retries.
 
+7. **No inter-chunk watchdog.** A first-token timeout does not bound a
+   long-lived HTTP/2 stream; a stall after the first delta would hold the host's
+   stream until its own idle timeout. Needs a gap watchdog between frames
+   (§4.8).
+
 ### Low
 
 8. `decodeExecServerMessage` returns `case: "readArgs"` without the path, unlike
@@ -159,7 +187,95 @@ tests, so the guarantee cannot rot silently — which is the whole lesson of §1
 
 ---
 
-## 4. What to do when a Cursor turn fails
+## 4. What the literature says we got wrong, and what it fixed
+
+Sources gathered while fixing §1, with the parts that changed this codebase marked.
+
+### 4.1 A counter invariant would have caught it without running a model
+
+The recommendation that mattered most: count the tool requests the upstream
+makes and the `tool_calls` the shim emits, and alert on any gap. A gap *is* the
+bug, and it is visible from counters alone — no model required.
+
+Implemented. `cursor_doctor` reports `N of M tool requests delivered` and treats
+a drop as a fault; `cursor_status` shows the three counters side by side.
+
+### 4.2 Termination is decided by classification, never by the absence of text
+
+OpenAI's agent loop defines a final answer as text output "**and there are no
+tool calls**" ([OpenAI Agents SDK](https://openai.github.io/openai-agents-python/running_agents/)).
+Providers routinely emit a preamble *and* a tool call, so "there is text" can
+never imply "no tool call". The original bug produced exactly that
+misclassification: a `stop` with text where a tool call belonged. The fix
+classifies the exec **before** choosing a `finish_reason`.
+
+### 4.3 Silent failure is the named enemy
+
+SWE-agent tripled pass@1 with no model change, purely through interface
+design, and names its principle directly: guardrails should "block common
+mistakes and return concise, specific error feedback rather than silent
+failures" ([SWE-agent](https://arxiv.org/abs/2405.15793)). This is why the
+client-error taxonomy exists — a caller's mistake reported as a 5xx sends the
+host hunting a server bug that is not there.
+
+### 4.4 A refusal is a result, not a non-event
+
+Anthropic returns errors to the model as a tool result with `is_error: true`;
+OpenAI's SDK has `tool_not_found_behavior="return_error_to_model"`. Silence is
+indistinguishable from completion — which is precisely the asymmetry that made
+the original bug look like a working chat box.
+
+**Considered and not adopted:** fabricating a synthetic `tool_calls` response
+for Cursor's own built-in execs, so the refusal travels through the host as a
+tool result. Rejecting on the wire and continuing keeps the loop inside
+Cursor's protocol, and is the behaviour the upstream project documents and
+observes working. Worth revisiting if a future protocol version stops the
+model from falling back after a wire-level refusal.
+
+### 4.5 Delivery and registration are different events
+
+MCP separates "schemas are delivered" (`tools/list`) from "the client has
+registered them", with `notifications/tools/list_changed` to re-fetch. A schema
+that is delivered but never registered produces precisely the symptom we had.
+The closest public account of the same failure is an unanswered LibreChat
+discussion about tool calls received but never executed on a custom
+OpenAI-compatible endpoint
+([discussion #14822](https://github.com/LibreChat-AI/LibreChat/discussions/14822)).
+
+The mid-stream schema handshake itself is **undocumented and unverified against
+any public source** — it traces only to the reverse-engineered `agent.v1`
+protocol. It can only be validated from our own captures.
+
+### 4.6 Cache invalidation rules out caching the tool set
+
+Tool definitions are hashed ahead of system and messages, so "modifying tool
+definitions invalidates the entire cache"
+([Anthropic](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)).
+The set this shim presents upstream must therefore be a pure function of the
+host's request. It is, and should stay so.
+
+### 4.7 Context rot is measured
+
+Recall degrades as history grows ([Effective Context
+Engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)),
+so tool contracts from early in a long conversation are effectively absent even
+when literally present. The prefix-exactness check before resuming is the right
+invariant, and now has tests.
+
+**Unverified:** we found no quantitative study of tool-definition drift after
+compaction specifically. Treat the mitigation as engineering practice, not
+measured result.
+
+### 4.8 A first-chunk timeout does not cover a mid-stream stall
+
+LiteLLM notes `stream_timeout` bounds only the first chunk
+([docs](https://docs.litellm.ai/docs/proxy/timeout)). Our upstream is a
+long-lived HTTP/2 stream, so a time-to-first-token bound alone is not enough —
+an inter-chunk watchdog is required. **Open item**, see §3.
+
+---
+
+## 5. What to do when a Cursor turn fails
 
 The failure modes are not the same, and the timing is the tell.
 
@@ -179,7 +295,7 @@ and spend the user's quota.
 
 ---
 
-## 5. Why the tests are shaped this way
+## 6. Why the tests are shaped this way
 
 The defect in §1 was invisible to unit tests and obvious to a live probe. So the
 suite is split by what each kind of test can actually catch:

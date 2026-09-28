@@ -427,6 +427,9 @@ const TOOLS = [
 			// by hand. On the success path everything above is already written to
 			// ZCode's config, so a copy-paste block is noise — and echoing a
 			// credential the user has no use for is a small risk for no gain.
+			// Only ever shown when the run could not finish, and then it is the
+			// user's way out. Printing it on success is noise: everything is already
+			// written, and a credential echoed for no reason is a small risk.
 			const block = [
 				"",
 				"If you have to finish this by hand, these are the values — Settings → Model Provider →",
@@ -437,7 +440,7 @@ const TOOLS = [
 				`  Request path : POST ${SHIM_PATHS.chat}`,
 				`  Models path  : GET ${SHIM_PATHS.models}`,
 				`  Response API : Chat completions (${SHIM_PATHS.chat})`,
-				`  Model        : ${modelsToPublish[0]}  (+${Math.max(modelsToPublish.length - 1, 0)} more)`,
+				`  Model        : ${suggested}  (+${Math.max(modelsToPublish.length - 1, 0)} more)`,
 			];
 
 			return content(
@@ -455,7 +458,7 @@ const TOOLS = [
 					"     provider.",
 					"",
 					"Nothing needs to be pasted into Settings — the provider is already written.",
-					...(registered.created ? [] : block),
+					...(healthy ? [] : block),
 				].join("\n"),
 				!healthy,
 			);
@@ -500,6 +503,27 @@ const TOOLS = [
 			//    the check that catches a moved port, which is individually
 			//    healthy on both sides and completely broken together.
 			const actual = outcome.ok ? `http://${shim.host}:${shim.port}/v1` : undefined;
+			// The invariant. Cursor asking for a tool and the host receiving one are
+			// two separate counts, and a gap between them is the exact signature of
+			// tool calling silently not working — visible here without ever running a
+			// model. This is the check that would have caught the original defect on
+			// the first turn instead of after a user noticed.
+			const metrics = shim.metrics();
+			if (metrics.droppedToolCalls > 0) {
+				faults.push(
+					`${metrics.droppedToolCalls} of ${metrics.toolRequests} tool requests never reached ` +
+						"the host — Cursor asked for tools this session did not register",
+				);
+				lines.push(
+					`  FAIL  ${metrics.droppedToolCalls}/${metrics.toolRequests} tool requests dropped ` +
+						"(a tool Cursor called is missing from the host's tool list)",
+				);
+			} else if (metrics.toolRequests > 0) {
+				lines.push(
+					`  ok    ${metrics.toolRequests} tool request(s) from Cursor, all delivered to the host`,
+				);
+			}
+
 			const provider = await inspectProviderConfig(
 				actual ? { baseUrl: actual } : {},
 			);
@@ -556,6 +580,10 @@ const TOOLS = [
 				`Shim: ${metrics.turns} turns, ${metrics.resumed} resumed, ${metrics.replayed} ` +
 					`replayed (resume rate ${metrics.resumeRate}), ` +
 					`${metrics.conversations} resumable conversations.`,
+			);
+			lines.push(
+				`Tools: ${metrics.toolRequests} requested by Cursor, ${metrics.toolCalls} delivered to ` +
+					`the host, ${metrics.droppedToolCalls} dropped.`,
 			);
 			if (!outcome.ok) {
 				lines.push(`Not serving: ${outcome.reason}.`);

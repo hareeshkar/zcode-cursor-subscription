@@ -29,9 +29,12 @@ const DATA =
 	process.env.CURSOR_SUBSCRIPTION_DATA ??
 	join(process.env.HOME, ".zcode/cli/plugins/data/cursor-subscription@dev-zcode-cursor-b9b95b48");
 const KEY = process.env.CURSOR_SHIM_KEY ?? (await readFile(join(DATA, "shim-key"), "utf8")).trim();
+// Above the shim's own idle timeout, so a probe reports what the shim did
+// rather than pre-empting it. A test that times out first hides the answer.
+const TIMEOUT = 180_000;
 const BASE = `http://127.0.0.1:${process.env.CURSOR_SHIM_PORT ?? "8477"}/v1`;
 const MODEL = process.argv[2] ?? "composer-2.5-fast";
-const TIMEOUT = 90_000;
+
 
 const TOOLS = [
 	{

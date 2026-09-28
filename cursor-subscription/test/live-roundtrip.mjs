@@ -33,6 +33,7 @@ const DATA =
 	process.env.CURSOR_SUBSCRIPTION_DATA ??
 	join(process.env.HOME, ".zcode/cli/plugins/data/cursor-subscription@dev-zcode-cursor-b9b95b48");
 const KEY = process.env.CURSOR_SHIM_KEY ?? (await readFile(join(DATA, "shim-key"), "utf8")).trim();
+const REQUEST_TIMEOUT_MS = 180_000;
 const PORT = process.env.CURSOR_SHIM_PORT ?? "8477";
 const BASE = `http://127.0.0.1:${PORT}/v1`;
 
@@ -62,7 +63,7 @@ const TOOLS = [
 	},
 ];
 
-const REQUEST_TIMEOUT_MS = 90_000;
+
 
 async function ask(model, messages, label) {
 	// A probe that can hang tells you nothing. Every request is bounded, and the

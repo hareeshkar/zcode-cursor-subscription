@@ -351,7 +351,11 @@ export function decodeExecServerMessage(bytes) {
 			execId = reader.string();
 		} else if (wireType === 2) {
 			const payload = reader.bytes();
-			const base = { id, execId };
+			// Every case carries its own field number. It is what the reply must
+			// be addressed to, and dropping it for the *known* variants is how a
+			// `readArgs` exec went entirely unanswered and hung the run: the
+			// refusal path had no slot to reply into, so nothing was sent.
+			const base = { id, execId, field };
 			if (field === 10) return { ...base, case: "requestContextArgs" };
 			if (field === 11) return { ...base, case: "mcpArgs", args: decodeMcpArgs(payload) };
 			if (field === 2) return { ...base, case: "shellArgs" };
