@@ -21,25 +21,36 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
 
-      # Dev-only tooling: the type-checker. It is not shipped and adds no runtime
-      # dependency, so installing it here does not weaken the promise below.
+      # Dev tooling lives at the repository root, never inside the plugin: ZCode
+      # copies the plugin directory verbatim into its install cache, so anything
+      # placed there ships. An earlier attempt put it in the plugin and shipped
+      # 26 MB of compiler with it.
       - name: Install dev-only tooling
-        working-directory: cursor-subscription
         run: npm install --no-audit --no-fund
 
       # The promise is "no *runtime* dependencies" — plain ESM on Node's standard
       # library, no build step. A dev-time type-checker is allowed; anything that
       # would ship is not.
-      - name: Assert no runtime dependencies
+      - name: Assert the plugin ships no dependencies of any kind
         run: |
           node -e '
             const pkg = require("./cursor-subscription/package.json");
-            for (const field of ["dependencies", "peerDependencies", "optionalDependencies"]) {
+            for (const field of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
               const n = Object.keys(pkg[field] ?? {}).length;
-              if (n) throw new Error(`expected no ${field}, found ${n}: ${Object.keys(pkg[field]).join(", ")}`);
+              if (n) throw new Error(`the plugin must declare no ${field}, found ${n}: ${Object.keys(pkg[field]).join(", ")}`);
             }
-            console.log("no runtime dependencies declared");
+            console.log("plugin declares no dependencies");
           '
+
+      # The plugin directory is copied verbatim into ZCode, so a stray node_modules
+      # would be shipped to users.
+      - name: Assert nothing dev-only sits inside the plugin
+        run: |
+          for stray in cursor-subscription/node_modules cursor-subscription/tsconfig.json cursor-subscription/package-lock.json; do
+            if [ -e "$stray" ]; then echo "::error::$stray must not exist — it would ship to users"; exit 1; fi
+          done
+          echo "plugin directory is clean"
+          
 
       # Blocks the defect class that caused three separate bugs here: a value
       # that can be absent in two ways, written as one and read as the other.
@@ -47,8 +58,7 @@ jobs:
       # Cursor ever sent. Only the null-safety codes fail the build; the rest are
       # a reported burn-down rather than a claim that the code is fully typed.
       - name: Type-check
-        working-directory: cursor-subscription
-        run: node scripts/typecheck.mjs
+        run: npm run typecheck
 
       - name: Verify the marketplace manifest matches the plugin
         run: |

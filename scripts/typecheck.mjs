@@ -15,7 +15,7 @@
  * failing the build. Pretending the codebase is fully typed would be worse than
  * saying exactly how far it has got.
  *
- *   node scripts/typecheck.mjs
+ *   npm run typecheck
  */
 
 import { spawnSync } from "node:child_process";
@@ -25,12 +25,13 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
+const plugin = join(root, "cursor-subscription");
 const tsc = join(root, "node_modules", ".bin", "tsc");
 
 if (!existsSync(tsc)) {
 	console.error(
-		"typescript is not installed. Run `npm install` first — it is a dev-only tool.\n" +
-			"The plugin itself still ships with no runtime dependencies.",
+		"typescript is not installed. Run `npm install` at the repository root — it is a\n" +
+			"dev-only tool. The plugin itself still ships with no dependencies at all.",
 	);
 	process.exit(2);
 }

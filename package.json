@@ -1,0 +1,13 @@
+{
+  "name": "zcode-cursor-subscription-marketplace",
+  "private": true,
+  "description": "Development tooling for the cursor-subscription plugin. ZCode copies the plugin directory verbatim into its install cache, so anything placed there ships — the type-checker therefore lives here, at the repository root, and never inside cursor-subscription/.",
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "scripts": {
+    "typecheck": "node scripts/typecheck.mjs",
+    "test": "cd cursor-subscription && node --test test/*.test.mjs"
+  }
+}
