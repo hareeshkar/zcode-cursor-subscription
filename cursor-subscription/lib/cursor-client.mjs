@@ -536,8 +536,8 @@ export function decodeUsableModels(bytes) {
 		while (!reader.done) {
 			const { field, wireType } = reader.tag();
 			if (field === 1 && wireType === 2) {
-				const id = decodeModelId(reader.bytes());
-				if (id) models.push(id);
+				const model = decodeAvailableModel(reader.bytes());
+				if (model) models.push(model);
 			} else {
 				reader.skip(wireType);
 			}
@@ -548,18 +548,45 @@ export function decodeUsableModels(bytes) {
 	return models;
 }
 
-function decodeModelId(bytes) {
+/**
+ * Decode one `AvailableModel`, using Cursor's own schema:
+ *
+ *   AvailableModel|1 name 9|5 supports_agent 8?|9 supports_thinking 8?
+ *     |10 supports_images 8?|15 context_token_limit 5?|17 client_display_name 9?
+ *     |18 server_model_name 9?|...
+ *
+ * Only the name was read before, which threw away three facts Cursor states
+ * outright: whether a model takes images, how large its context actually is, and
+ * what to call it. Guessing those produced a plugin that advertised every model
+ * as text-only with the same invented 200k window.
+ *
+ * Returns `undefined` when there is no name, so a malformed entry is skipped
+ * rather than becoming a nameless model.
+ */
+export function decodeAvailableModel(bytes) {
 	const reader = new Reader(bytes);
+	const model = { name: "", supportsImages: false, supportsThinking: false, contextTokenLimit: undefined, displayName: undefined };
 	while (!reader.done) {
 		const { field, wireType } = reader.tag();
-		if (field === 1 && wireType === 2) {
+		if (wireType === 2) {
 			const value = reader.string();
-			if (value) return value;
+			if (field === 1) model.name = value;
+			else if (field === 17) model.displayName = value;
+		} else if (wireType === 0) {
+			const value = reader.varint();
+			if (field === 10) model.supportsImages = value === 1;
+			else if (field === 9) model.supportsThinking = value === 1;
+			else if (field === 15 && value > 0) model.contextTokenLimit = value;
 		} else {
 			reader.skip(wireType);
 		}
 	}
-	return undefined;
+	return model.name ? model : undefined;
+}
+
+/** Kept for callers that only need the id. */
+function decodeModelId(bytes) {
+	return decodeAvailableModel(bytes)?.name;
 }
 
 /**
@@ -857,10 +884,20 @@ export async function fetchUsableModels(accessToken, { fetchImpl, signal } = {})
 	return models;
 }
 
+/** A model's id, whether it arrived as a string or a decoded object. */
+function nameOf(model) {
+	return typeof model === "string" ? model : String(model?.name ?? "");
+}
+
+/** Just the ids, for callers that do not care about capabilities. */
+export function modelIds(models) {
+	return models.map(nameOf).filter((id) => id.length > 0);
+}
+
 /** Sort models by name so the picker is stable regardless of Cursor's order. */
 const collator = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
 export function sortModelsByName(models) {
-	return [...models].sort((a, b) => collator.compare(a, b));
+	return [...models].sort((a, b) => collator.compare(nameOf(a), nameOf(b)));
 }
 
 export { concatBytes };

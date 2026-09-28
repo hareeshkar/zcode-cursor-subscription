@@ -30,7 +30,7 @@ import { canAnchorTurn, planRequestControls } from "../lib/shim.mjs";
 import { ConversationStore } from "../lib/conversation-store.mjs";
 import { pickProbeModels } from "../lib/selftest.mjs";
 import { Writer, Reader, encodeValue } from "../lib/proto.mjs";
-import { decodeCheckpointUsedTokens } from "../lib/cursor-client.mjs";
+import { decodeAvailableModel, decodeCheckpointUsedTokens, modelIds, sortModelsByName } from "../lib/cursor-client.mjs";
 
 /** Build an ExecServerMessage exactly as observed on the wire. */
 function execFrame({ id = 1, execId = "", fields = [] }) {
@@ -418,4 +418,51 @@ test("an absent schema still encodes as a valid empty object, not a broken one",
 		}
 	}
 	assert.ok(sawJson, "field 6 must always be present");
+});
+
+// --- model capabilities, read from Cursor rather than assumed --------------
+
+/** Build an AvailableModel the way the wire does. */
+function availableModel({ name, images, thinking, ctx }) {
+	const w = new Writer().string(1, name);
+	if (images !== undefined) w.varint(10, images ? 1 : 0);
+	if (thinking !== undefined) w.varint(9, thinking ? 1 : 0);
+	if (ctx !== undefined) w.varint(15, ctx);
+	return w.finish();
+}
+
+test("a model's declared capabilities are decoded, not discarded", () => {
+	// Only the name used to be read, so three facts Cursor states outright were
+	// thrown away and every model was advertised as text-only with an invented
+	// 200k window.
+	const m = decodeAvailableModel(availableModel({ name: "gemini-3-flash", images: true, thinking: true, ctx: 1_000_000 }));
+	assert.equal(m.name, "gemini-3-flash");
+	assert.equal(m.supportsImages, true);
+	assert.equal(m.supportsThinking, true);
+	assert.equal(m.contextTokenLimit, 1_000_000);
+});
+
+test("absent capability flags read as false rather than undefined", () => {
+	// This is the live case: Cursor answered for 241 models with no image flag
+	// set on any of them, so `false` is the honest reading and a blanket claim
+	// would be wrong.
+	const m = decodeAvailableModel(availableModel({ name: "composer-2.5" }));
+	assert.equal(m.supportsImages, false);
+	assert.equal(m.supportsThinking, false);
+	assert.equal(m.contextTokenLimit, undefined);
+});
+
+test("a nameless entry is skipped rather than becoming a nameless model", () => {
+	assert.equal(decodeAvailableModel(new Writer().varint(10, 1).finish()), undefined);
+	assert.equal(decodeAvailableModel(new Writer().finish()), undefined);
+});
+
+test("ids and capability objects both sort and register", () => {
+	// Callers receive objects now; a string still has to behave.
+	assert.deepEqual(modelIds([{ name: "b" }, "a"]), ["b", "a"]);
+	assert.deepEqual(
+		modelIds(sortModelsByName([{ name: "b" }, { name: "a" }])),
+		["a", "b"],
+	);
+	assert.deepEqual(sortModelsByName(["b", "a"]), ["a", "b"], "plain ids still sort");
 });

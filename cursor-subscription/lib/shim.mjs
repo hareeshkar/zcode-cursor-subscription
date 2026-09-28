@@ -543,7 +543,7 @@ export class CursorShim {
 	}
 
 	async #models(response) {
-		let models = FALLBACK_MODELS;
+		let models = FALLBACK_MODELS.map((id) => ({ name: id }));
 		try {
 			const token = await this.#auth.accessToken();
 			const discovered = await fetchUsableModels(token);
@@ -558,7 +558,22 @@ export class CursorShim {
 		response.end(
 			JSON.stringify({
 				object: "list",
-				data: models.map((id) => ({ id, object: "model", created, owned_by: "cursor" })),
+				// Cursor states each model's capabilities, so they are passed through
+				// for anything that reads this endpoint rather than being flattened
+				// to a bare id.
+				data: models.map((model) => {
+					const id = typeof model === "string" ? model : model.name;
+					return {
+						id,
+						object: "model",
+						created,
+						owned_by: "cursor",
+						name: typeof model === "string" ? undefined : model.displayName,
+						supports_images: typeof model === "string" ? undefined : model.supportsImages,
+						supports_thinking: typeof model === "string" ? undefined : model.supportsThinking,
+						context_token_limit: typeof model === "string" ? undefined : model.contextTokenLimit,
+					};
+				}),
 			}),
 		);
 	}

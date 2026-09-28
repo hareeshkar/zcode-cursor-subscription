@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { CursorAuthService } from "../lib/auth.mjs";
 import { CredentialStore } from "../lib/credentials.mjs";
 import { CursorShim } from "../lib/shim.mjs";
-import { fetchUsableModels, sortModelsByName } from "../lib/cursor-client.mjs";
+import { fetchUsableModels, modelIds, sortModelsByName } from "../lib/cursor-client.mjs";
 import { pickProbeModels, probeModel } from "../lib/selftest.mjs";
 import { registerModels, ensureShimProvider, reconcileProviderKey } from "../lib/register-provider.mjs";
 import { removeShimProvider, removePluginInstallation } from "../lib/uninstall.mjs";
@@ -291,7 +291,10 @@ const TOOLS = [
 			const limit = Number(args.models);
 			const models =
 				Number.isFinite(limit) && limit > 0
-					? pickProbeModels(available, { limit })
+					? // A cap is expressed as ids; map back to the capability objects.
+						pickProbeModels(modelIds(available), { limit }).map(
+							(id) => available.find((m) => m.name === id) ?? id,
+						)
 					: available;
 
 			const result = await registerModels({
@@ -375,7 +378,7 @@ const TOOLS = [
 			// pays for these models either way, and the picker is the only place
 			// they can see what their subscription actually includes. So publish
 			// everything the account reports, not just what was cheap enough to test.
-			const probeSet = pickProbeModels(available, { limit: 6 });
+			const probeSet = pickProbeModels(modelIds(available), { limit: 6 });
 			const probes = [];
 			for (const model of probeSet) {
 				probes.push(await probeModel(await shimOrigin(), shim.apiKey, model));
@@ -401,8 +404,11 @@ const TOOLS = [
 			// 3. Create the provider if it is missing, and publish every model the
 			//    account can use. The user is not asked to open Settings at any point.
 			const cap = Number(args.models);
+			// Objects, not ids: registration reads each model's capabilities from
+			// Cursor's own declaration rather than writing one blanket guess.
 			const modelsToPublish =
 				Number.isFinite(cap) && cap > 0 ? available.slice(0, cap) : available;
+			const publishIds = modelIds(modelsToPublish);
 			const registered = await ensureShimProvider({
 				models: modelsToPublish,
 				baseUrl: await shimBaseUrl(),
@@ -440,7 +446,7 @@ const TOOLS = [
 				`  Request path : POST ${SHIM_PATHS.chat}`,
 				`  Models path  : GET ${SHIM_PATHS.models}`,
 				`  Response API : Chat completions (${SHIM_PATHS.chat})`,
-				`  Model        : ${suggested}  (+${Math.max(modelsToPublish.length - 1, 0)} more)`,
+				`  Model        : ${suggested}  (+${Math.max(publishIds.length - 1, 0)} more)`,
 			];
 
 			return content(

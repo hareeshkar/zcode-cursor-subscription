@@ -216,12 +216,35 @@ RequestContext|2 rules #0*|4 env #1|6 repository_info #2*|7 tools #3*|...
 
 ---
 
+## Image support: settled by Cursor's own answer
+
+`AvailableModel` declares capabilities per model:
+
+```
+AvailableModel|1 name 9|5 supports_agent 8?|9 supports_thinking 8?|10 supports_images 8?
+  |15 context_token_limit 5?|17 client_display_name 9?|18 server_model_name 9?|...
+```
+
+Queried live, the account returned **241 models and not one of them sets
+`supports_images`**. Neither `supports_thinking` nor `context_token_limit` is set
+either.
+
+That closes the image question. It was never a transport bug: the shim's encoding
+matches Cursor's own schema field for field, and the API states the capability is
+unavailable. The empirical result — five models, two kinds of image, none seeing
+it — now has a cause rather than a hypothesis.
+
+It also means the honest `supportsImage: false` was correct, and it is now
+**data-driven** rather than a blanket constant: the flag is read per model, so a
+model that does declare image support would get it automatically.
+
 ## What this changed
 
 | Finding | Action |
 |---|---|
 | `mcp_tools` on the run request | now sent, alongside the proven exec reply |
 | `client_supports_inline_images` | now sent when an image is attached |
+| `AvailableModel` capabilities | now decoded: `supports_images`, `supports_thinking`, `context_token_limit`, `client_display_name`. All read `false`/absent live, so image support is genuinely unavailable on this endpoint |
 | `input_schema_json` (field 6) | now sent alongside the Value encoding |
 | `token_details` path | confirmed; decoder fixed to read it |
 | Structured history family | documented, encoders exported, **not yet used** |

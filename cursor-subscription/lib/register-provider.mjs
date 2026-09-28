@@ -56,14 +56,26 @@ import { dirname, join } from "node:path";
  *                        per-model window, so a larger number would be invented.
  *   maxOutputTokens      unchanged from the baseline.
  */
-function modelConfigFor() {
+function modelConfigFor(model) {
+	// Capabilities come from Cursor's own `AvailableModel`, so they are stated
+	// rather than guessed. A string (a bare id) falls back to the generic
+	// baseline, which is what the fallback list produces when discovery fails.
+	const capability = typeof model === "object" && model !== null ? model : {};
+	const contextWindow =
+		Number.isFinite(capability.contextTokenLimit) && capability.contextTokenLimit > 0
+			? capability.contextTokenLimit
+			: 200_000;
 	return {
 		enabled: true,
 		properties: {
-			contextWindow: 200_000,
+			contextWindow,
 			inputFormat: {
 				supportsText: true,
-				supportsImage: false,
+				// Per model, from Cursor. The blanket `false` this replaces was a
+				// tested result at the time — images were not reaching any model — but
+				// it also hid a capability from every model that genuinely has one.
+				// Cursor publishes the flag, so it is read rather than assumed.
+				supportsImage: capability.supportsImages === true,
 				supportsVideo: false,
 				supportsAudio: false,
 				supportsPdf: false,
@@ -296,7 +308,13 @@ export async function ensureShimProvider({
 }
 
 export async function registerModels({ models, baseUrl, path = providerConfigPath(), providerName }) {
-	const clean = [...new Set(models.filter((m) => typeof m === "string" && m.length > 0))].sort();
+	// Accept both ids and Cursor's decoded objects; keep the capabilities keyed by id.
+	const byId = new Map();
+	for (const model of models ?? []) {
+		if (typeof model === "string" && model.length > 0) byId.set(model, model);
+		else if (model && typeof model.name === "string" && model.name.length > 0) byId.set(model.name, model);
+	}
+	const clean = [...byId.keys()].sort();
 	if (clean.length === 0) {
 		return {
 			ok: false,
@@ -367,7 +385,7 @@ export async function registerModels({ models, baseUrl, path = providerConfigPat
 		const existingRule = perProvider.find(
 			(r) => r.providerId === provider.providerId && r.modelId === modelId,
 		);
-		const config = modelConfigFor();
+		const config = modelConfigFor(byId.get(modelId));
 		if (existingRule) {
 			// Refresh rather than skip: an entry written by an earlier version held
 			// only `{ enabled: true }` and inherited generic capabilities the model

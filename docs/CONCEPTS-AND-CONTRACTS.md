@@ -195,10 +195,16 @@ conclusions:
 2. There may be an undeclared request-side capability flag. Neither `ModelDetails`
    field 2 nor the gaps at exec fields 6, 12 and 13 have any known meaning.
 
-**Consequence in the product:** models are advertised as `supportsImage: false`.
-A tested "no" is worth more than an untested "yes" — and it has a useful side
-effect, because the host then substitutes placeholder text, so the user gets a
-clear signal instead of a model that flails and stalls.
+**Resolved — and it was never our bug.** Cursor's `AvailableModel` declares
+capabilities per model, including `supports_images`. Queried live, **all 241
+models on this account report no image support**, as does `supports_thinking` and
+`context_token_limit`. The encoding was correct against Cursor's own schema; the
+API simply does not offer the capability.
+
+So models are advertised as `supportsImage: false`, and that is now **read from
+Cursor** rather than being a blanket constant — a model that did declare support
+would get it automatically. The host substitutes placeholder text for an image,
+which gives the user a clear signal instead of a model that flails and stalls.
 
 ---
 
@@ -325,7 +331,7 @@ Recorded so nobody has to rediscover it.
 
 | Item | State |
 |---|---|
-| Image delivery | Encoded correctly against Cursor's own schema, still not received. `client_supports_inline_images` is now set; the untested route that remains is the structured history family |
+| Image delivery | **Closed.** Cursor declares `supports_images` false for all 241 models on this account. The encoding is correct; the capability is not offered |
 | Structured history | The protocol has typed user/assistant/tool messages, tool calls and reasoning. We replay as a text transcript. Largest known fidelity gap — see the schema doc |
 | Typed exec rejections | Generic refusal works; per-tool reasons would let the model distinguish failures |
 | Parallel tool calls | Unverified; the run ends at the first call |
