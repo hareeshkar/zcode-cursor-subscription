@@ -41,8 +41,11 @@ import {
 	decodeExecServerMessage,
 	decodeInteractionQuery,
 	decodeInteractionUpdate,
+	rejectionFor,
 	decodeTtftBreakdown,
 	decodeKvServerMessage,
+	encodeExecClientMessage,
+	encodeExecClientMessageEnvelope,
 	encodeGetBlobResult,
 	encodeKvClientMessage,
 	encodeMcpToolDefinition,
@@ -775,7 +778,7 @@ export class CursorShim {
 	 * permission prompts. ZCode cannot answer mid-stream, so the alternative
 	 * would be executing tools inside the shim and bypassing its prompts.
 	 */
-	async #collect(runRequest, tools, accessToken, blobStore, onDelta) {
+	async #collect(runRequest, tools, accessToken, blobStore, onDelta, toolNames) {
 		const run = new AgentRun(accessToken);
 		await run.start({ runRequestBytes: runRequest, tools });
 
@@ -935,9 +938,21 @@ export class CursorShim {
 							run.end();
 							break;
 						}
-						if (typeof exec.field === "number") {
+						// Name the tools that ARE available. A bare refusal leaves the
+						// model to guess, and the observed behaviour is that it keeps
+						// reaching for its own built-in tools instead of the host's.
+						const available = [...toolNames].join(", ");
+						const reason = available
+							? `${TOOL_REJECT_REASON} The tools you can call are: ${available}.`
+							: TOOL_REJECT_REASON;
+						const rejection = rejectionFor(exec, reason);
+						if (rejection) {
 							refusals[exec.field] = (refusals[exec.field] ?? 0) + 1;
-							run.rejectExec(exec.id, exec.execId, exec.field, TOOL_REJECT_REASON);
+							run.writeMessage(
+								encodeExecClientMessageEnvelope(
+									encodeExecClientMessage(exec.id, exec.execId, rejection.field, rejection.payload),
+								),
+							);
 						} else {
 							// No slot to reply into, so nothing is sent. Cursor waits for
 							// every exec to be answered, which makes this a stall, not a
@@ -1067,7 +1082,7 @@ export class CursorShim {
 		try {
 			result = await this.#collect(runRequest, tools, accessToken, ctx.blobStore, ({ kind, text }) => {
 				sendDelta(kind === "text" ? { content: text } : { reasoning_content: text });
-			});
+			}, ctx.toolNames);
 		} catch (error) {
 			// Several OpenAI-compatible clients only surface a business error from
 			// inside a 200 SSE body, so send it that way.
@@ -1101,7 +1116,7 @@ export class CursorShim {
 	async #complete(response, runRequest, tools, accessToken, ctx) {
 		let result;
 		try {
-			result = await this.#collect(runRequest, tools, accessToken, ctx.blobStore);
+			result = await this.#collect(runRequest, tools, accessToken, ctx.blobStore, undefined, ctx.toolNames);
 		} catch (error) {
 			response.writeHead(502, { "content-type": "application/json" });
 			response.end(

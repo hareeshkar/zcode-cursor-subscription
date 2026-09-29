@@ -335,6 +335,90 @@ export function encodeMcpToolDefinition({ name, description, inputSchema, provid
 	return writer.finish();
 }
 
+
+/**
+ * Typed rejections for every Cursor built-in exec.
+ *
+ * Cursor's own bundle declares a distinct result message per exec, each with a
+ * dedicated rejection arm:
+ *
+ *   ShellResult   { rejected=4: ShellRejected }      ShellStream  { rejected=5 }
+ *   ReadResult    { rejected=3: {path, reason} }     LsResult     { rejected=3 }
+ *   GrepResult    { error=2: {error} }               WriteResult  { rejected=6 }
+ *   DeleteResult  { rejected=6 }                     FetchResult  { error=2: {url, error} }
+ *   BackgroundShellSpawnResult { rejected=3 }        WriteShellStdinResult { error=2 }
+ *   DiagnosticsResult { success=1 }                  McpResult    { error=2 }
+ *
+ * The reply travels on the exec's own field with the shape that field expects.
+ * A generic error shape on a streaming shell exec left the server waiting — the
+ * run stalled with no error anywhere — which is why the per-exec shapes matter
+ * even though a wrong-but-present reply works for some execs.
+ */
+export function rejectionFor(exec, reason) {
+	switch (exec.case) {
+		case "shellArgs":
+			return { field: 2, payload: shellRejectedResult(4, exec.command, reason) };
+		case "shellStreamArgs":
+			return { field: 14, payload: shellRejectedResult(5, exec.command, reason) };
+		case "backgroundShellSpawnArgs":
+			return { field: 16, payload: shellRejectedResult(3, exec.command, reason) };
+		case "readArgs":
+			return { field: 7, payload: pathRejected(3, exec.path, reason) };
+		case "lsArgs":
+			return { field: 8, payload: pathRejected(3, exec.path, reason) };
+		case "grepArgs":
+			return { field: 5, payload: errorResult(2, exec.pattern || reason) };
+		case "writeArgs":
+			return { field: 3, payload: pathRejected(6, exec.path, reason) };
+		case "deleteArgs":
+			return { field: 4, payload: pathRejected(6, exec.path, reason) };
+		case "fetchArgs":
+			return { field: 20, payload: fetchError(exec.url, reason) };
+		case "writeShellStdinArgs":
+			return { field: 23, payload: errorResult(2, reason) };
+		case "diagnosticsArgs":
+			return { field: 9, payload: new Writer().message(1, new Uint8Array(0)).finish() };
+		case "recordScreenArgs":
+		case "computerUseArgs":
+		case "listMcpResourcesExecArgs":
+		case "readMcpResourceExecArgs":
+			return { field: exec.field, payload: encodeMcpError(reason) };
+		default:
+			// An exec variant newer than this build. The generic error shape on the
+			// exec's own field is proven to resume the run (the field-36 case).
+			if (typeof exec.field !== "number") return undefined;
+			return { field: exec.field, payload: encodeMcpError(reason) };
+	}
+}
+
+/** ShellRejected { command=1, working_directory=2, reason=3, is_readonly=4 }. */
+function shellRejectedResult(rejectedField, command, reason) {
+	const rejected = new Writer()
+		.string(1, command ?? "")
+		.string(2, "")
+		.string(3, reason)
+		.varint(4, 1)
+		.finish();
+	return new Writer().message(rejectedField, rejected).finish();
+}
+
+/** { path=1, reason=2 } inside the given rejected arm. */
+function pathRejected(rejectedField, path, reason) {
+	const rejected = new Writer().string(1, path ?? "").string(2, reason).finish();
+	return new Writer().message(rejectedField, rejected).finish();
+}
+
+/** { error=1 } inside the given error arm. */
+function errorResult(errorField, error) {
+	return new Writer().message(errorField, new Writer().string(1, error).finish()).finish();
+}
+
+/** FetchResult { error=2 { url=1, error=2 } }. */
+function fetchError(url, reason) {
+	const inner = new Writer().string(1, url ?? "").string(2, reason).finish();
+	return new Writer().message(2, inner).finish();
+}
+
 /** McpResult { success=1 | error=2 { message=1 } } — the generic "not available" reply. */
 export function encodeMcpError(error) {
 	return new Writer().message(2, new Writer().string(1, error).finish()).finish();
@@ -515,6 +599,18 @@ const EXEC_SPAN_CONTEXT_FIELD = 19;
  * wedges the run: the server waits forever for a reply. Any coherent reply
  * resumes it, so the field number is what makes rejection possible.
  */
+
+/** Field 1 of an args payload as a string — the primary identifier of most execs. */
+function decodeSinglePathArg(bytes) {
+	const reader = new Reader(bytes);
+	while (!reader.done) {
+		const { field, wireType } = reader.tag();
+		if (field === 1 && wireType === 2) return reader.string();
+		reader.skip(wireType);
+	}
+	return "";
+}
+
 export function decodeExecServerMessage(bytes) {
 	const reader = new Reader(bytes);
 	let id = 0;
@@ -535,20 +631,26 @@ export function decodeExecServerMessage(bytes) {
 			// `readArgs` exec went entirely unanswered and hung the run: the
 			// refusal path had no slot to reply into, so nothing was sent.
 			const base = { id, execId, field };
+			// The typed rejections quote the target back to the server (a ReadResult
+			// rejection carries the path that was requested), so each arg schema's
+			// primary identifier is extracted here. Schemas are Cursor's own:
+			//   ReadArgs|1 path|2 tool_call_id   WriteArgs|1 path   DeleteArgs|1 path
+			//   LsArgs|1 path   GrepArgs|1 pattern|2 path?   FetchArgs|1 url
+			const primary = decodeSinglePathArg(payload);
 			if (field === 10) return { ...base, case: "requestContextArgs" };
 			if (field === 11) return { ...base, case: "mcpArgs", args: decodeMcpArgs(payload) };
 			if (field === 2) return { ...base, case: "shellArgs" };
-			if (field === 3) return { ...base, case: "writeArgs" };
-			if (field === 4) return { ...base, case: "deleteArgs" };
-			if (field === 5) return { ...base, case: "grepArgs" };
-			if (field === 7) return { ...base, case: "readArgs" };
-			if (field === 8) return { ...base, case: "lsArgs" };
+			if (field === 3) return { ...base, case: "writeArgs", path: primary };
+			if (field === 4) return { ...base, case: "deleteArgs", path: primary };
+			if (field === 5) return { ...base, case: "grepArgs", pattern: primary };
+			if (field === 7) return { ...base, case: "readArgs", path: primary };
+			if (field === 8) return { ...base, case: "lsArgs", path: primary };
 			if (field === 9) return { ...base, case: "diagnosticsArgs" };
 			if (field === 14) return { ...base, case: "shellStreamArgs" };
-			if (field === 16) return { ...base, case: "backgroundShellSpawnArgs" };
+			if (field === 16) return { ...base, case: "backgroundShellSpawnArgs", command: primary };
 			if (field === 17) return { ...base, case: "listMcpResourcesExecArgs" };
 			if (field === 18) return { ...base, case: "readMcpResourceExecArgs" };
-			if (field === 20) return { ...base, case: "fetchArgs" };
+			if (field === 20) return { ...base, case: "fetchArgs", url: primary };
 			if (field === 21) return { ...base, case: "recordScreenArgs" };
 			if (field === 22) return { ...base, case: "computerUseArgs" };
 			if (field === 23) return { ...base, case: "writeShellStdinArgs" };
