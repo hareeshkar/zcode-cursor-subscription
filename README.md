@@ -269,12 +269,18 @@ per-file in [`NOTICE.md`](cursor-subscription/NOTICE.md).
 
 ### Known limits, stated plainly
 
-This ships as usable, not finished. What is measured, and what is not.
+This ships as usable, not finished. What was verified end to end, and what was not.
 
-**Working and verified live:**
+**Working, verified with a real agent loop** — tool call emitted, executed for real,
+result fed back, model answered:
 
-- **Tool calls**, end to end: a model emits a call, the host runs it, the model uses the result — proven
-  on Composer, Grok, GPT and Claude, streaming and non-streaming.
+| Model | Full loop result |
+|---|---|
+| grok-4.7-medium | answered `port 8080` on turn 2 |
+| gemini-3.8-flash-high | answered `port 8080` on turn 2 |
+| composer-2.5-fast | answered `port 8080` on turn 2 |
+| claude-4.5-sonnet | answered `port 8080` on turn 2 |
+
 - **Server-side conversation reuse.** `cursor_status` reports a real resume rate, and a second turn that
   is an exact extension genuinely resumes. This was believed impossible for most of the project's life
   and was in fact our bug — see the audit.
@@ -282,14 +288,28 @@ This ships as usable, not finished. What is measured, and what is not.
   a resumed second). It reported zero forever before that, which meant the host's compaction threshold
   had nothing real to work from.
 
+**Known limitation: Composer's first turn after a tool result.**
+
+Composer (all tiers tested) sometimes re-issues the same tool call immediately after
+the result arrives — once, not indefinitely. The fix that holds for the other three
+families (quoting the pending tool results directly into the continuation action)
+reduced this for Composer but did not eliminate it: in repeated runs Composer
+alternates between answering correctly and re-calling the tool once more before
+converging. Grok occasionally reads the text replay of its own tool output as
+third-party content and refuses to act on it — the same turn, a different answer,
+which is model adherence to a text transcript rather than a transport defect.
+Claude and GPT are reliable on this path. ZCode's own loop-round cap is what
+bounds the behaviour for every model; the shim cannot and should not loop on the
+model's behalf.
+
 **Not working, and stated as such:**
 
-- **Image input.** The shim encodes images exactly as the reference implementation does — payload and
+- **Image input.** The shim encodes images exactly as Cursor's own schema declares — payload and
   field-7 tag provably present — but across five models and two kinds of image (synthetic and a real
   screenshot) the model reports receiving none, and then goes hunting with built-in tools. Models are
-  advertised as `supportsImage: false` because that was *tested*, not assumed. A side effect worth
-  having: the host substitutes placeholder text, so the user gets a clear signal instead of a model that
-  flails and stalls.
+  advertised as `supportsImage: false` because that was *tested*, not assumed: Cursor's `AvailableModel`
+  reports `supports_images` false for every model on the account. The host substitutes placeholder text,
+  so the user gets a clear signal instead of a model that flails and stalls.
 - **Reasoning level.** Effort is carried in Cursor's model id, not the request — the account exposes
   `-low`/`-high`/`-thinking` variants as distinct models. A selection made in the reasoning picker
   therefore cannot be transmitted, and is reported as an approximation rather than ignored.
@@ -300,6 +320,29 @@ This ships as usable, not finished. What is measured, and what is not.
 
 Every one of these is reported by the tooling rather than hidden — `cursor_doctor` lists what a session
 approximated, and `cursor_status` shows the counters.
+
+### How we know what ran
+
+Every claim above traces to a recorded run, not to a reading of the code. The
+evidence chain that made that possible, worth keeping for the next person:
+
+- **`cursor_status` counters** — turns, resumed, replayed, tool requests, tool
+  calls delivered, tool calls dropped. A divergence between requested and
+  delivered is the signature of tool calling failing, and it is visible without
+  running a model.
+- **The startup mode line** — every shim prints `history=<mode> client=<version>`
+  when it starts, so a recorded result is attributable to the exact path that
+  produced it. A result that cannot be attributed is a guess.
+- **Byte-level checks** — when a request's behaviour was in question, the encoded
+  bytes were decoded and the fields read directly. Two encoder bugs (a nested
+  message one level too deep, a dropped tool-call branch) were found that way and
+  would have passed any amount of code review.
+- **`test/live-structured.mjs`** — the replay matrix, measuring recall of a value
+  that exists only in the replayed history. Gated behind `CURSOR_LIVE_TESTS=1`
+  because it spends quota; run it before and after any change to the replay path.
+- **A stale-process rule** — three separate rounds of testing silently measured a
+  pre-fix shim that was still holding port 8477. Check who owns the port, every
+  time, before trusting a result.
 
 ## Documentation
 

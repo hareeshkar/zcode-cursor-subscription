@@ -319,6 +319,41 @@ had checked.
 
 ---
 
+### The Composer limitation, and the evidence chain
+
+The final agent-loop matrix — tool call, real execution, result fed back, model
+answers — verified on all four families with the results quoted into the action:
+
+  grok-4.7-medium        turn 2, answered
+  gemini-3.8-flash-high  turn 2, answered
+  composer-2.5-fast      turn 2, answered
+  claude-4.5-sonnet      turn 2, answered
+
+**Composer's residual limitation:** in repeated runs Composer alternates between
+answering correctly and re-issuing the same tool call once more before converging.
+The quoted-in-action fix reduced this but did not eliminate it — Composer's
+adherence to a text transcript is weaker than the other families'. Grok shows a
+different adherence quirk: it occasionally reads the replayed record of its own
+tool output as third-party pasted content and refuses to act on it. Both are model
+behaviours, not transport defects: the bytes on the wire are identical, and the
+models that answer prove the path carries everything needed. ZCode's loop-round
+cap is what bounds the behaviour; the shim must not loop on the model's behalf.
+
+**The evidence chain** — what makes "it ran" checkable rather than a claim:
+
+- `cursor_status` counters: tool requests vs delivered vs dropped. A divergence is
+  the tool-calling failure signature, visible with no model call at all.
+- The startup mode line `history=<mode> client=<version>` — a recorded result is
+  attributable to the path that produced it. An unattributable result is a guess.
+- Byte-level decodes of outgoing requests. Found two encoder bugs (a nested
+  message one level too deep; a dropped tool-call branch) that read correctly in
+  the source.
+- `test/live-structured.mjs`: recall-based, gated by `CURSOR_LIVE_TESTS=1`.
+- **Check who owns the port before trusting a result.** Three rounds of testing
+  silently measured a stale pre-fix shim still holding 8477.
+
+---
+
 ## 2. Proven
 
 | Claim | Evidence |
