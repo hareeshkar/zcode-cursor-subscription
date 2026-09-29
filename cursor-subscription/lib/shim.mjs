@@ -737,6 +737,11 @@ export class CursorShim {
 		// root-prompt blob, and answering empty would erase ZCode's system prompt
 		// for the rest of the session.
 		const blobStore = new Map(anchor?.blobs ?? []);
+		if (process.env.CURSOR_SHIM_DEBUG) {
+			this.log(
+				`request: lastRole=${messages[messages.length - 1]?.role} anchor=${anchor ? "yes" : "no"} msgs=${messages.length}`,
+			);
+		}
 		const runRequest = buildRunRequest({
 			messages,
 			checkpoint: anchor?.checkpoint,

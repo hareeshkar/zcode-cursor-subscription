@@ -323,3 +323,42 @@ test("a call with unparseable arguments still names the tool", () => {
 	]);
 	assert.ok(history.includes("[TOOL CALL] shell"), "the name survives missing arguments");
 });
+
+// --- the tool-result continuation -------------------------------------------
+
+test("a tool-result ending re-asks the original request with the result in the transcript", () => {
+	// The loop bug: the transcript used to drop everything after the last user
+	// message, so this re-ask made the model redo the tool call forever. Now the
+	// result is in the transcript, so the re-ask is answerable.
+	const { history, lastUser } = renderColdStartHistory([
+		{ role: "user", content: "Read the deploy script and tell me the port." },
+		{
+			role: "assistant",
+			content: null,
+			tool_calls: [{ id: "c1", type: "function", function: { name: "read_file", arguments: '{"path":"/srv/deploy.sh"}' } }],
+		},
+		{ role: "tool", tool_call_id: "c1", tool_name: "read_file", content: "PORT=8080" },
+	]);
+	assert.equal(lastUser, "Read the deploy script and tell me the port.");
+	assert.match(history, /TOOL CALL/, "the call is in the transcript");
+	assert.match(history, /PORT=8080/, "the result is in the transcript");
+});
+
+test("a tool-result ending quotes the pending results into the action", () => {
+	// Some models (gemini, composer observed) re-call the tool even when the
+	// result is in the transcript. Quoting the pending results into the action
+	// makes the continuation unmissable, and is what fixed the loop for all four
+	// model families.
+	const { lastUser } = renderColdStartHistory([
+		{ role: "user", content: "What port?" },
+		{
+			role: "assistant",
+			content: null,
+			tool_calls: [{ id: "c1", type: "function", function: { name: "read_file", arguments: '{"path":"/srv/app.ini"}' } }],
+		},
+		{ role: "tool", tool_call_id: "c1", tool_name: "read_file", content: "port = 8080" },
+	]);
+	// The action is the original request; the caller (buildRunRequest) quotes the
+	// pending results beneath it. Verify the pieces it assembles from.
+	assert.equal(lastUser, "What port?");
+});

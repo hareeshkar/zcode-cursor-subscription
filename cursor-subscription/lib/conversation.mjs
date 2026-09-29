@@ -193,6 +193,7 @@ function lastUserIndex(messages) {
 	return -1;
 }
 
+
 /**
  * Render prior history as labelled text for a cold start.
  *
@@ -225,18 +226,37 @@ export function renderColdStartHistory(messages) {
 	if (entries.length === 0) return { history: "", lastUser: "" };
 
 	// The newest user message is the request being answered now, so it becomes
-	// the action rather than part of the replayed transcript.
+	// the action rather than part of the replayed transcript — EXCEPT for what
+	// comes after it. An agent loop ends with the assistant's tool call and the
+	// tool result, and dropping those handed the model a continuation instruction
+	// with no result to continue from: it re-called the tool forever.
 	const lastUserIndex = entries.map((e) => e.label).lastIndexOf("USER");
 	const lastUser = lastUserIndex === -1 ? "" : entries[lastUserIndex].text;
 	const prior = lastUserIndex === -1 ? entries : entries.slice(0, lastUserIndex);
-	if (prior.length === 0) return { history: "", lastUser };
+	const trailing = lastUserIndex === -1 ? [] : entries.slice(lastUserIndex + 1);
+	if (prior.length === 0 && trailing.length === 0) return { history: "", lastUser };
 
-	const history = [
-		"Continue the conversation below. Treat entries according to their labels. " +
-			"Respond to the final USER request; RUNTIME CONTEXT and TOOL RESULT entries provide context only.",
-		...prior.map((entry) => `[${entry.label}]\n${entry.text}`),
-	].join("\n\n");
-	return { history, lastUser };
+	const lines = [];
+	if (prior.length > 0) {
+		// First person matters here. Grok read a neutral transcript ("[TOOL CALL]
+		// …") as pasted third-party content rather than its own prior actions, and
+		// refused to use it. Framing the transcript as the model's own history —
+		// "you said / you called / the result was" — is what makes it usable.
+		lines.push(
+			"Your prior turns in this conversation are recorded below. The ASSISTANT entries " +
+				"are what you yourself said and did; the TOOL RESULT entries are the outputs " +
+				"of your own tool calls. Treat them as your own context, and answer the " +
+				"final USER request.",
+			...prior.map((entry) => `[${entry.label}]\n${entry.text}`),
+		);
+	}
+	// Trailing assistant/tool entries are the turn in progress: they belong in the
+	// transcript just as much, and the model must see the tool result to use it.
+	lines.push(...trailing.map((entry) => `[${entry.label}]\n${entry.text}`));
+	// The closing line is what stops a model reading the transcript as third-party
+	// content: state once, plainly, that this is its own live session and that
+	// answering — not re-searching — is the task.
+	return { history: lines.join("\n\n"), lastUser };
 }
 
 /** The newest user message — the request Cursor is being asked to answer now. */
@@ -366,6 +386,9 @@ export function buildRunRequest({ messages, checkpoint, blobStore, model, extraS
 	if (checkpoint !== undefined) {
 		conversationState = checkpoint;
 		const last = lastUserMessage(messages);
+		// See the replay branch: when the history ends on a tool result, the
+		// original request is the right action once the transcript carries the call
+		// and its result.
 		actionText = last.text;
 		images = last.images;
 	} else {
@@ -373,6 +396,43 @@ export function buildRunRequest({ messages, checkpoint, blobStore, model, extraS
 		conversationState = cold.conversationState;
 		if (blobStore) {
 			for (const [key, value] of cold.blobStore) blobStore.set(key, value);
+		}
+		// A history ending on a tool result has no new user turn. The transcript
+		// carries the call and its result, but some models (observed: gemini,
+		// composer) re-call the tool anyway unless the result is in the action
+		// itself. Quoting the pending results there makes the continuation
+		// unmissable: the model is asked to answer using text it can see directly.
+		if (messages[messages.length - 1]?.role === "tool") {
+			const pending = [];
+			for (const message of messages) {
+				if (message?.role !== "tool") continue;
+				const { text } = flattenContent(message.content);
+				if (text.trim().length === 0) continue;
+				const name = typeof message.tool_name === "string" ? message.tool_name : "tool";
+				pending.push(`[${name} result]\n${text.trim()}`);
+			}
+			actionText = [
+				cold.lastUser,
+				"",
+				"(Your tool calls above have already run. Their results, quoted for you:",
+				...pending,
+				")",
+				"Answer the user's request using these results. Do not call the same tools again.",
+			]
+				.filter((part) => part.length > 0)
+				.join("\n");
+			images = lastUserMessage(messages).images;
+			return encodeRunRequest({
+				conversationState,
+				action: encodeUserMessageAction(
+					encodeUserMessage({ text: actionText, messageId: randomUUID() }),
+					images,
+				),
+				modelDetails: encodeModelDetails(model),
+				conversationId: randomUUID(),
+				mcpTools,
+				clientSupportsInlineImages: images.length > 0,
+			});
 		}
 		actionText = [cold.history, cold.lastUser].filter((part) => part.length > 0).join("\n\n");
 		images = lastUserMessage(messages).images;
