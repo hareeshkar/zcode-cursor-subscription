@@ -713,11 +713,12 @@ export class CursorShim {
 		// express. Anything it cannot is recorded rather than quietly ignored.
 		const controls = planRequestControls(body);
 		for (const note of controls.notes) this.#note(note);
-		const extraSystem = controls.extraSystem;
+		let extraSystem = controls.extraSystem;
+
+		const declared = Array.isArray(body.tools) ? body.tools : [];
 
 		// Register the host's own tools with Cursor so the model calls *them*,
 		// not Cursor's built-ins. This is what keeps execution inside ZCode.
-		const declared = Array.isArray(body.tools) ? body.tools : [];
 		const toolNames = new Set();
 		const encodedTools = [];
 		for (const tool of controls.suppressTools ? [] : declared) {
@@ -738,6 +739,25 @@ export class CursorShim {
 					toolName: name,
 				}),
 			);
+		}
+
+		if (toolNames.size > 0) {
+			extraSystem = [
+				extraSystem,
+				"# Tool environment",
+				"",
+				"You are running inside the ZCode harness. The ONLY tools available in this",
+				"session are the ones listed below, exactly under these names:",
+				"",
+				...[...toolNames].map((name) => `- ${name}`),
+				"",
+				"Tool names you may know from other environments (for example Shell, run_command,",
+				"or a native grep/read that is not in the list above) DO NOT EXIST here. If a call",
+				"to one of them is refused, that refusal is final: pick the closest tool from the",
+				"list above instead. Never say a tool is broken or unavailable — use the list.",
+			]
+				.filter((part) => part.length > 0)
+				.join("\n");
 		}
 
 		const model = typeof body.model === "string" ? body.model : FALLBACK_MODELS[0];
