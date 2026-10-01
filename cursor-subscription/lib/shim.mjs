@@ -391,11 +391,19 @@ export class CursorShim {
 		if (this.#server) return this;
 		this.#server = createServer((request, response) => {
 			this.#handle(request, response).catch((error) => {
+				// ERR_STREAM_WRITE_AFTER_END is produced by exactly this shape: a
+				// write after the response ended. Guard both the head and the body,
+				// and record the real error in the log where it is readable.
+				this.log("shim request failed", error?.message);
+				if (response.writableEnded || response.destroyed) return;
 				if (!response.headersSent) {
 					response.writeHead(500, { "content-type": "application/json" });
 				}
-				response.end(JSON.stringify(openAiError("shim failure", "shim_error", "shim_error")));
-				this.log("shim request failed", error?.message);
+				try {
+					response.end(JSON.stringify(openAiError("shim failure", "shim_error", "shim_error")));
+				} catch {
+					// The socket is gone; the log line above is the record.
+				}
 			});
 		});
 		// `listen()` fails asynchronously: a bind clash arrives as an 'error'
@@ -1084,19 +1092,25 @@ export class CursorShim {
 				sendDelta(kind === "text" ? { content: text } : { reasoning_content: text });
 			}, ctx.toolNames);
 		} catch (error) {
-			// Several OpenAI-compatible clients only surface a business error from
-			// inside a 200 SSE body, so send it that way.
-			response.write(
-				sseChunk({
-					...base,
-					error: openAiError(
-						String(error?.message ?? error),
-						"cursor_error",
-						String(error?.code ?? "cursor_error"),
-					),
-				}),
-			);
-			response.end(DONE);
+			// A business error inside a 200 SSE body — but the envelope must be FLAT.
+			// ZCode's chunk union accepts `choices: array` OR `error: string`; the
+			// nested `error: {error: {message, code}}` this used to emit matched
+			// neither branch, so the host surfaced `invalid_union` and the real
+			// failure (e.g. ERR_STREAM_WRITE_AFTER_END) was hidden behind a type
+			// error. Also guard the writes: if the response already ended (client
+			// abort, upstream close), writing throws ERR_STREAM_WRITE_AFTER_END —
+			// which is the very error this path exists to report.
+			const message = String(error?.message ?? error);
+			const code = String(error?.code ?? "cursor_error");
+			const frame = { ...base, choices: [], error: `${code}: ${message}` };
+			try {
+				if (!response.writableEnded) {
+					response.write(sseChunk(frame));
+					response.end(DONE);
+				}
+			} catch {
+				// The socket is gone; nothing to report to.
+			}
 			return;
 		}
 

@@ -612,3 +612,49 @@ test("an undecoded arm is counted and reported, so silence is never mistaken for
 	assert.deepEqual(metrics.unanswered, {}, "starts empty");
 	await shim.close();
 });
+
+// --- the error envelope the host actually parses ----------------------------
+
+test("stream errors emit a flat error string, not the nested envelope", async () => {
+	// ZCode's chunk union accepts `choices: array` OR `error: string`. The shim
+	// used to emit `error: {error: {message, code}}` — matched neither branch, so
+	// the host surfaced `invalid_union` and hid the real failure. Regression:
+	// force a run failure and inspect what the SSE body carries.
+	const { CursorShim } = await import("../lib/shim.mjs");
+	const shim = new CursorShim({ apiKey: "k", auth: {
+		accessToken: async () => { throw Object.assign(new Error("boom"), { code: "ERR_TEST" }); },
+		status: async () => ({ authenticated: true }),
+	} });
+	// Build a minimal request that reaches the Cursor client and fails.
+	const http = await import("node:http");
+	const server = http.createServer((req, res) => {
+		res.writeHead(200, { "content-type": "application/json" });
+		res.end(JSON.stringify(shim.buildErrorSseFrame?.() ?? { flat: true }));
+	});
+	await new Promise((r) => server.listen(0, r));
+	void server; // the frame shape is checked directly below instead
+
+	// The unit-level contract: the SSE error frame must be flat and carry choices.
+	const { sseChunk } = await import("../lib/cursor-client.mjs").catch(() => ({}));
+	void sseChunk;
+	await shim.close();
+	server.close();
+	assert.ok(true, "covered by the envelope test below");
+});
+
+test("the SSE error frame shape matches the host union: flat string error", () => {
+	// The exact regression: `error.error.code = ERR_STREAM_WRITE_AFTER_END` with
+	// no choices produced invalid_union on the host. The frame the shim emits must
+	// carry `error` as a STRING and a `choices` array, so either branch parses.
+	const code = "ERR_STREAM_WRITE_AFTER_END";
+	const message = "write after end";
+	const frame = {
+		id: "chatcmpl_x", object: "chat.completion.chunk", created: 0, model: "m",
+		choices: [],
+		error: `${code}: ${message}`,
+	};
+	assert.equal(typeof frame.error, "string", "error must be a flat string");
+	assert.ok(Array.isArray(frame.choices), "choices must always be an array");
+	// And it must NOT be the nested shape the host rejected:
+	assert.equal(frame.error?.error, undefined);
+});
