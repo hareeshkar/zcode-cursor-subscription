@@ -362,3 +362,44 @@ test("a tool-result ending quotes the pending results into the action", () => {
 	// pending results beneath it. Verify the pieces it assembles from.
 	assert.equal(lastUser, "What port?");
 });
+
+// --- the harness context the model receives ---------------------------------
+
+test("the tool-environment section is built from the host's own tool names", () => {
+	// The context given to the model must be derived from what ZCode actually
+	// sent — never a hardcoded list — so it stays correct as ZCode's tool set
+	// evolves. Simulate the shim's assembly: extraSystem + the registered names.
+	const hostToolNames = ["Bash", "Read", "Write", "Edit", "Grep", "Glob"];
+	const extraSystem = [
+		"# Tool environment",
+		"",
+		"You are running inside the ZCode harness. The ONLY tools available in this",
+		"session are the ones listed below, exactly under these names:",
+		"",
+		...hostToolNames.map((name) => `- ${name}`),
+		"",
+		"Tool names you may know from other environments (for example Shell, run_command,",
+		"or a native grep/read that is not in the list above) DO NOT EXIST here. If a call",
+		"to one of them is refused, that refusal is final: pick the closest tool from the",
+		"list above instead. Never say a tool is broken or unavailable — use the list.",
+	]
+		.filter((p2) => p2.trim().length > 0)
+		.join("\n");
+
+	const cold = buildColdStart(
+		[{ role: "system", content: "base rules" }, { role: "user", content: "hi" }],
+		extraSystem,
+	);
+	const blobText = [...cold.blobStore.values()]
+		.map((b) => Buffer.from(b).toString("utf8"))
+		.join("\n");
+
+	for (const name of hostToolNames) {
+		assert.ok(blobText.includes(`- ${name}`), `tool ${name} must be listed`);
+	}
+	assert.ok(blobText.includes("ZCode harness"), "the harness is named");
+	assert.ok(blobText.includes("DO NOT EXIST here"), "the no-other-names rule is stated");
+	// And it must travel in the root-prompt blob, which Cursor fetches back.
+	const ids = [...cold.blobStore.keys()];
+	assert.equal(ids.length, 1, "exactly one root prompt blob");
+});
