@@ -630,27 +630,39 @@ export function decodeExecServerMessage(bytes) {
 			// be addressed to, and dropping it for the *known* variants is how a
 			// `readArgs` exec went entirely unanswered and hung the run: the
 			// refusal path had no slot to reply into, so nothing was sent.
-			const base = { id, execId, field };
-			// The typed rejections quote the target back to the server (a ReadResult
-			// rejection carries the path that was requested), so each arg schema's
-			// primary identifier is extracted here. Schemas are Cursor's own:
-			//   ReadArgs|1 path|2 tool_call_id   WriteArgs|1 path   DeleteArgs|1 path
-			//   LsArgs|1 path   GrepArgs|1 pattern|2 path?   FetchArgs|1 url
-			const primary = decodeSinglePathArg(payload);
+			// Decode the fields the translation layer needs, per Cursor's own arg
+			// schemas (ShellArgs|1 tool_call_id, ReadArgs|1 path|4 offset|5 limit,
+			// GrepArgs|1 pattern|2 path|3 glob, WriteArgs|1 path|2 file_text,
+			// FetchArgs|1 url, BackgroundShellSpawnArgs|1 command, ...).
+			const args = {};
+			{
+				const ar = new Reader(payload);
+				while (!ar.done) {
+					const t2 = ar.tag();
+					if (t2.wireType !== 2) { ar.skip(t2.wireType); continue; }
+					const v = ar.bytes();
+					const text = new TextDecoder().decode(v);
+					if (t2.field === 1) args.primary = text;
+					else if (t2.field === 2) args.second = text;
+					else if (t2.field === 3) args.third = text;
+					else if (t2.field === 4) args.fourth = text;
+				}
+			}
+			const base = { id, execId, field, args };
 			if (field === 10) return { ...base, case: "requestContextArgs" };
 			if (field === 11) return { ...base, case: "mcpArgs", args: decodeMcpArgs(payload) };
 			if (field === 2) return { ...base, case: "shellArgs" };
-			if (field === 3) return { ...base, case: "writeArgs", path: primary };
-			if (field === 4) return { ...base, case: "deleteArgs", path: primary };
-			if (field === 5) return { ...base, case: "grepArgs", pattern: primary };
-			if (field === 7) return { ...base, case: "readArgs", path: primary };
-			if (field === 8) return { ...base, case: "lsArgs", path: primary };
+			if (field === 3) return { ...base, case: "writeArgs" };
+			if (field === 4) return { ...base, case: "deleteArgs" };
+			if (field === 5) return { ...base, case: "grepArgs" };
+			if (field === 7) return { ...base, case: "readArgs" };
+			if (field === 8) return { ...base, case: "lsArgs" };
 			if (field === 9) return { ...base, case: "diagnosticsArgs" };
 			if (field === 14) return { ...base, case: "shellStreamArgs" };
-			if (field === 16) return { ...base, case: "backgroundShellSpawnArgs", command: primary };
+			if (field === 16) return { ...base, case: "backgroundShellSpawnArgs" };
 			if (field === 17) return { ...base, case: "listMcpResourcesExecArgs" };
 			if (field === 18) return { ...base, case: "readMcpResourceExecArgs" };
-			if (field === 20) return { ...base, case: "fetchArgs", url: primary };
+			if (field === 20) return { ...base, case: "fetchArgs" };
 			if (field === 21) return { ...base, case: "recordScreenArgs" };
 			if (field === 22) return { ...base, case: "computerUseArgs" };
 			if (field === 23) return { ...base, case: "writeShellStdinArgs" };

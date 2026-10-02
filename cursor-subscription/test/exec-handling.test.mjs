@@ -658,3 +658,83 @@ test("the SSE error frame shape matches the host union: flat string error", () =
 	// And it must NOT be the nested shape the host rejected:
 	assert.equal(frame.error?.error, undefined);
 });
+
+// --- built-in to ZCode tool translation: the first-class path ----------------
+
+import { translateBuiltinExec } from "../lib/translate.mjs";
+
+const HOST_TOOLS = [
+  { function: { name: "Bash", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } } },
+  { function: { name: "Read", parameters: { type: "object", properties: { path: { type: "string" }, offset: { type: "number" }, limit: { type: "number" } }, required: ["path"] } } },
+  { function: { name: "Grep", parameters: { type: "object", properties: { pattern: { type: "string" }, path: { type: "string" }, glob: { type: "string" } }, required: ["pattern"] } } },
+  { function: { name: "Write", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } } },
+];
+const HOST_NAMES = new Set(HOST_TOOLS.map((t) => t.function.name));
+
+test("Cursor's read exec translates into the host's Read with the same path", () => {
+  const translated = translateBuiltinExec(
+    { case: "readArgs", field: 7, execId: "e1", args: { primary: "/srv/app.ini" } },
+    HOST_NAMES, HOST_TOOLS,
+  );
+  assert.equal(translated.toolName, "Read");
+  const args = JSON.parse(translated.arguments);
+  assert.equal(args.path, "/srv/app.ini");
+  // offset/limit were not sent by Cursor, so they must not be invented
+  assert.equal("offset" in args, false);
+});
+
+test("Cursor's streaming shell exec translates into the host's Bash command", () => {
+  const translated = translateBuiltinExec(
+    { case: "shellStreamArgs", field: 14, execId: "e2", args: { primary: "git status" } },
+    HOST_NAMES, HOST_TOOLS,
+  );
+  assert.equal(translated.toolName, "Bash");
+  assert.equal(JSON.parse(translated.arguments).command, "git status");
+});
+
+test("Cursor's grep exec maps pattern and optional path onto the host's Grep", () => {
+  const translated = translateBuiltinExec(
+    { case: "grepArgs", field: 5, execId: "e3", args: { primary: "TODO", second: "src/" } },
+    HOST_NAMES, HOST_TOOLS,
+  );
+  const args = JSON.parse(translated.arguments);
+  assert.equal(args.pattern, "TODO");
+  assert.equal(args.path, "src/");
+});
+
+test("Cursor's write exec maps path and file_text onto the host's Write content", () => {
+  const translated = translateBuiltinExec(
+    { case: "writeArgs", field: 3, execId: "e4", args: { primary: "/tmp/a.txt", second: "hello" } },
+    HOST_NAMES, HOST_TOOLS,
+  );
+  const args = JSON.parse(translated.arguments);
+  assert.equal(args.path, "/tmp/a.txt");
+  assert.equal(args.content, "hello");
+});
+
+test("arguments are checked against the host schema, so wrong param names cannot pass", () => {
+  // The model's confusion in live testing was passing file_path where the host
+  // wants path. The schema intersection guarantees host-shaped arguments.
+  const translated = translateBuiltinExec(
+    { case: "readArgs", field: 7, args: { primary: "/x" } },
+    HOST_NAMES, HOST_TOOLS,
+  );
+  const args = JSON.parse(translated.arguments);
+  assert.ok("path" in args, "path is what the host schema declares");
+  assert.ok(!("file_path" in args));
+});
+
+test("an exec with no matching host tool falls back to refusal", () => {
+  // deleteArgs has no safe host mapping in this set — the translator returns
+  // null and the caller falls back to the typed rejection.
+  const translated = translateBuiltinExec(
+    { case: "deleteArgs", field: 4, args: { primary: "/tmp/x" } },
+    HOST_NAMES, HOST_TOOLS,
+  );
+  assert.equal(translated, null, "no host tool can serve delete here");
+});
+
+test("mcp_args and request_context_args are never translated", () => {
+  assert.equal(translateBuiltinExec({ case: "mcpArgs", field: 11 }, HOST_NAMES, HOST_TOOLS), null);
+  assert.equal(translateBuiltinExec({ case: "requestContextArgs", field: 10 }, HOST_NAMES, HOST_TOOLS), null);
+});

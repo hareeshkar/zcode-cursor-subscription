@@ -35,6 +35,7 @@ import { AuthError, CursorAuthService } from "./auth.mjs";
 import { CredentialStore } from "./credentials.mjs";
 import { ConversationStore, planTurn } from "./conversation-store.mjs";
 import { buildRunRequest } from "./conversation.mjs";
+import { translateBuiltinExec } from "./translate.mjs";
 import {
 	AgentRun,
 	decodeCheckpointUsedTokens,
@@ -751,14 +752,11 @@ export class CursorShim {
 				"",
 				...[...toolNames].map((name) => `- ${name}`),
 				"",
-				"Tool names you may know from other environments (for example Shell, run_command,",
-				"or a native grep/read that is not in the list above) DO NOT EXIST here. If a call",
-				"to one of them is refused, that refusal is final: pick the closest tool from the",
-				"list above instead. Never say a tool is broken or unavailable — use the list.",
-				"",
-				"Call these tools directly as ordinary function calls. There is no dynamic-tool",
-				"namespace, no CallDynamicTool step, and no XML call format: those routes do not",
-				"exist in this harness and trying them wastes a turn.",
+				"You may also call file and shell tools under your native Cursor names (read, grep,",
+				"shell, write): those are routed to this harness automatically and executed with the",
+				"user's permissions. Call tools directly as ordinary function calls — there is no",
+				"dynamic-tool namespace, no CallDynamicTool step, and no XML call format. Never say",
+				"a tool is broken or unavailable; make the call and the harness routes it.",
 			]
 				.filter((part) => part.length > 0)
 				.join("\n");
@@ -970,6 +968,22 @@ export class CursorShim {
 							run.end();
 							break;
 						}
+						// First-class path: translate the built-in into the host's tool.
+						// The model calls what it knows natively; ZCode executes under its
+						// own permissions. Only when no registered tool can serve it does
+						// the typed refusal follow — naming the tools that do exist.
+						const translated = translateBuiltinExec(exec, toolNames, declared);
+						if (translated) {
+							toolCall = {
+								id: translated.callId,
+								type: "function",
+								function: { name: translated.toolName, arguments: translated.arguments },
+							};
+							this.#stats.toolCalls += 1;
+							run.end();
+							break;
+						}
+
 						// Name the tools that ARE available. A bare refusal leaves the
 						// model to guess, and the observed behaviour is that it keeps
 						// reaching for its own built-in tools instead of the host's.
@@ -1038,6 +1052,18 @@ export class CursorShim {
 		});
 	}
 
+
+/**
+ * Translate a Cursor built-in exec into the equivalent ZCode tool call.
+ *
+ * Cursor's model natively calls its own file and shell tools (read, grep, shell
+ * streams, ...). Refusing those forced the model through refusal loops; the
+ * first-class behaviour is to translate each built-in into the host's registered
+ * tool with matching arguments, so the model behaves exactly as it would in
+ * Cursor while ZCode executes under its own permission system.
+ *
+ * Only tools the host actually registered are eligible — the name in the returned
+ * call is always one ZCode declared, and the arguments are checked against the
 	/**
 	 * Translate a Cursor exec request into an OpenAI tool call.
 	 *

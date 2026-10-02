@@ -314,9 +314,14 @@ model's behalf.
   `-low`/`-high`/`-thinking` variants as distinct models. A selection made in the reasoning picker
   therefore cannot be transmitted, and is reported as an approximation rather than ignored.
 - **Parallel tool calls in one turn** are unverified; the run ends at the first call.
-- **Refusals are generic.** Cursor's own filesystem and shell tools are declined with one generic error
-  rather than a typed, per-tool reason, so the model cannot distinguish "permission denied" from
-  "unsupported".
+- **Cursor's built-in tools are translated, not executed.** When the model calls its native read/grep/
+  shell, the shim translates each into the matching ZCode tool call — Read, Grep, Bash — checked against
+  the host's own JSON schema, so parameter names are exactly what ZCode declared. ZCode executes under
+  its own permission prompts. Deletions have no safe ZCode mapping and are refused with guidance.
+- **The harness context is stated in the system prompt.** Every run carries a tool-environment section:
+  the harness name, the exact tool list from the host's request, that native Cursor tool names are
+  routed automatically, and that dynamic-tool namespaces and XML call formats do not exist here. This is
+  what stopped the model declaring tools broken and reaching for refusal workarounds.
 
 Every one of these is reported by the tooling rather than hidden — `cursor_doctor` lists what a session
 approximated, and `cursor_status` shows the counters.
