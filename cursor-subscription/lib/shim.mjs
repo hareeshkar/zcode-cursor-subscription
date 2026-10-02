@@ -743,20 +743,21 @@ export class CursorShim {
 		}
 
 		if (toolNames.size > 0) {
+			// Purely informative and positive: naming the harness and tools. Earlier
+			// wording warned about refusals and unavailable names, and that warning
+			// itself suppressed tool calls — grok answered questions in text rather
+			// than risk a refusal. Refusal guidance belongs in the refusal messages,
+			// which already name the available tools.
 			extraSystem = [
 				extraSystem,
 				"# Tool environment",
 				"",
-				"You are running inside the ZCode harness. The ONLY tools available in this",
-				"session are the ones listed below, exactly under these names:",
+				"You are running inside the ZCode harness. These are your tools in this session:",
 				"",
 				...[...toolNames].map((name) => `- ${name}`),
 				"",
-				"You may also call file and shell tools under your native Cursor names (read, grep,",
-				"shell, write): those are routed to this harness automatically and executed with the",
-				"user's permissions. Call tools directly as ordinary function calls — there is no",
-				"dynamic-tool namespace, no CallDynamicTool step, and no XML call format. Never say",
-				"a tool is broken or unavailable; make the call and the harness routes it.",
+				"Call them by these exact names as ordinary function calls, with the parameters",
+				"defined in each tool's schema.",
 			]
 				.filter((part) => part.length > 0)
 				.join("\n");
@@ -794,7 +795,7 @@ export class CursorShim {
 			turnsInState: TURNS_IN_STATE,
 		});
 
-		const run = { toolNames, model, messages, blobStore, conversationId };
+		const run = { toolNames, declared, model, messages, blobStore, conversationId };
 		return body.stream
 			? this.#stream(response, runRequest, encodedTools, accessToken, run)
 			: this.#complete(response, runRequest, encodedTools, accessToken, run);
@@ -808,7 +809,7 @@ export class CursorShim {
 	 * permission prompts. ZCode cannot answer mid-stream, so the alternative
 	 * would be executing tools inside the shim and bypassing its prompts.
 	 */
-	async #collect(runRequest, tools, accessToken, blobStore, onDelta, toolNames) {
+	async #collect(runRequest, tools, accessToken, blobStore, onDelta, toolNames, declared) {
 		const run = new AgentRun(accessToken);
 		await run.start({ runRequestBytes: runRequest, tools });
 
@@ -1140,7 +1141,7 @@ export class CursorShim {
 		try {
 			result = await this.#collect(runRequest, tools, accessToken, ctx.blobStore, ({ kind, text }) => {
 				sendDelta(kind === "text" ? { content: text } : { reasoning_content: text });
-			}, ctx.toolNames);
+			}, ctx.toolNames, ctx.declared);
 		} catch (error) {
 			// A business error inside a 200 SSE body — but the envelope must be FLAT.
 			// ZCode's chunk union accepts `choices: array` OR `error: string`; the
@@ -1180,7 +1181,7 @@ export class CursorShim {
 	async #complete(response, runRequest, tools, accessToken, ctx) {
 		let result;
 		try {
-			result = await this.#collect(runRequest, tools, accessToken, ctx.blobStore, undefined, ctx.toolNames);
+			result = await this.#collect(runRequest, tools, accessToken, ctx.blobStore, undefined, ctx.toolNames, ctx.declared);
 		} catch (error) {
 			response.writeHead(502, { "content-type": "application/json" });
 			response.end(
