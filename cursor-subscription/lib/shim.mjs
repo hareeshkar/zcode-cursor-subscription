@@ -755,6 +755,10 @@ export class CursorShim {
 				"or a native grep/read that is not in the list above) DO NOT EXIST here. If a call",
 				"to one of them is refused, that refusal is final: pick the closest tool from the",
 				"list above instead. Never say a tool is broken or unavailable — use the list.",
+				"",
+				"Call these tools directly as ordinary function calls. There is no dynamic-tool",
+				"namespace, no CallDynamicTool step, and no XML call format: those routes do not",
+				"exist in this harness and trying them wastes a turn.",
 			]
 				.filter((part) => part.length > 0)
 				.join("\n");

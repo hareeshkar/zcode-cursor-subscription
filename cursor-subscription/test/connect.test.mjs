@@ -403,3 +403,36 @@ test("the tool-environment section is built from the host's own tool names", () 
 	const ids = [...cold.blobStore.keys()];
 	assert.equal(ids.length, 1, "exactly one root prompt blob");
 });
+
+test("the tool-environment section forbids the dynamic-tool and XML routes", () => {
+	// Grok's observed behaviour: after a refusal it went looking for
+	// CallDynamicTool and a "zcode-cursor-subscription namespace", burning turns on
+	// routes that do not exist in this harness. The section has to name those
+	// routes as absent, in the same breath as the tool list.
+	const hostToolNames = ["Bash", "Read"];
+	const extraSystem = [
+		"# Tool environment",
+		"",
+		"You are running inside the ZCode harness. The ONLY tools available in this",
+		"session are the ones listed below, exactly under these names:",
+		"",
+		...hostToolNames.map((name) => `- ${name}`),
+		"",
+		"Call these tools directly as ordinary function calls. There is no dynamic-tool",
+		"namespace, no CallDynamicTool step, and no XML call format: those routes do not",
+		"exist in this harness and trying them wastes a turn.",
+	].join("\n");
+
+	const cold = buildColdStart(
+		[{ role: "system", content: "rules" }, { role: "user", content: "hi" }],
+		extraSystem,
+	);
+	const blobText = [...cold.blobStore.values()].map((b) => Buffer.from(b).toString("utf8")).join("\n");
+
+	assert.match(blobText, /no dynamic-tool/);
+	assert.match(blobText, /no CallDynamicTool step/);
+	assert.match(blobText, /no XML call format/);
+	for (const name of hostToolNames) {
+		assert.ok(blobText.includes(`- ${name}`), `${name} still listed`);
+	}
+});
