@@ -69,7 +69,11 @@ export function translateBuiltinExec(exec, toolNames, declared) {
 		return {
 			toolName: candidate,
 			arguments: JSON.stringify(args),
-			callId: exec.execId || `call_${Math.random().toString(36).slice(2, 10)}`,
+			// Same sanitization: Cursor's execId can contain a newline (it joins two
+			// ids), and a control character in the OpenAI tool_call id breaks the
+			// host's pairing and rendering.
+			callId: (exec.execId ?? "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64) ||
+				`call_${Math.random().toString(36).slice(2, 10)}`,
 		};
 	}
 	return null;

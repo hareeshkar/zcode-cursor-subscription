@@ -1112,7 +1112,12 @@ export class CursorShim {
 			return null;
 		}
 		return {
-			id: callId || `call_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
+			// Cursor's execId is two ids joined by a NEWLINE (model call id + tool
+			// call id). A control character inside the OpenAI tool_call id breaks
+			// the host's result pairing and UI rendering — the call arrives but the
+			// turn stalls with no visible tool execution. Sanitize to a safe subset.
+			id: (callId ?? "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64) ||
+				`call_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
 			type: "function",
 			function: { name, arguments: JSON.stringify(args ?? {}) },
 		};

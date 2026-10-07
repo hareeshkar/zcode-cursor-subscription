@@ -738,3 +738,17 @@ test("mcp_args and request_context_args are never translated", () => {
   assert.equal(translateBuiltinExec({ case: "mcpArgs", field: 11 }, HOST_NAMES, HOST_TOOLS), null);
   assert.equal(translateBuiltinExec({ case: "requestContextArgs", field: 10 }, HOST_NAMES, HOST_TOOLS), null);
 });
+
+// --- tool-call id sanitization: the newline that stalled ZCode --------------
+
+test("cursor exec ids are sanitized to a safe OpenAI tool_call id", () => {
+	// Cursor's execId joins a model call id and a tool call id with a NEWLINE.
+	// Delivered raw, the control character inside the OpenAI tool_call id breaks
+	// the host's pairing and UI rendering: the call arrives, nothing appears, and
+	// the turn stalls. Verified live: every delivered id contained 0x0a.
+	const raw = "call-39fd5b95-58d5-411e-a00a-ec9885a770fc-4\nfc_d2c0cf55-105a-9786-afa3-590668b4b904_0";
+	const sanitized = raw.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64);
+	assert.ok(!/[\x00-\x1f]/.test(sanitized), "no control characters may remain");
+	assert.ok(sanitized.length > 0 && sanitized.length <= 64);
+	assert.match(sanitized, /^[A-Za-z0-9_-]+$/, "only safe id characters");
+});
