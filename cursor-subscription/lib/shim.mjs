@@ -1124,7 +1124,13 @@ export class CursorShim {
 	}
 
 	#buildChoice(result, toolNames) {
-		const toolCall = this.#toToolCall(result.toolCall, toolNames);
+		// A translated built-in arrives already OpenAI-shaped; an mcp_args exec must
+		// still be converted. Skipping the conversion for already-shaped calls is
+		// what keeps translated calls from being silently dropped here — passing
+		// them through #toToolCall returned null and downgraded the turn to `stop`.
+		const toolCall = result.toolCall?.type === "function"
+			? result.toolCall
+			: this.#toToolCall(result.toolCall, toolNames);
 		if (toolCall) {
 			this.#stats.toolCalls += 1;
 			return {

@@ -354,7 +354,8 @@ export function buildRunRequest({ messages, checkpoint, blobStore, model, extraS
 			action: encodeUserMessageAction(encodeUserMessage({ text: actionText, messageId: randomUUID() }), []),
 			modelDetails: encodeModelDetails(model),
 			conversationId: randomUUID(),
-			mcpTools,
+			// EXPERIMENT: field 4 disabled to isolate the text-only regression
+			// mcpTools,
 			clientSupportsInlineImages: images.length > 0,
 		});
 	}
@@ -378,7 +379,7 @@ export function buildRunRequest({ messages, checkpoint, blobStore, model, extraS
 			),
 			modelDetails: encodeModelDetails(model),
 			conversationId: randomUUID(),
-			mcpTools,
+			// mcpTools, // EXPERIMENT disabled
 			clientSupportsInlineImages: images.length > 0,
 		});
 	}
@@ -430,7 +431,7 @@ export function buildRunRequest({ messages, checkpoint, blobStore, model, extraS
 				),
 				modelDetails: encodeModelDetails(model),
 				conversationId: randomUUID(),
-				mcpTools,
+				// mcpTools, // EXPERIMENT disabled
 				clientSupportsInlineImages: images.length > 0,
 			});
 		}
