@@ -272,6 +272,10 @@ ExecServerMessage (oneof)      reply slot on ExecClientMessage
 
 Unassigned in 1–56: 1, 6, 12, 13, 15, 24–26, 32–35, 39.
 
+Notation reminder: trailing `9` = string, `5`/`13` = int32/uint32 varints,
+`8` = bool, `1` = double (fixed64 — PiBash's timeout; skipping wireType 1 in a
+decoder makes such fields silently absent), `12` = bytes.
+
 **There is no native old/new edit exec in the main family.** The only
 string-replacement edit is `pi_edit` (field 47):
 `PiEditExecArgs|1 path|2 edits*` with `PiEditReplacement|1 old_text|2 new_text`.

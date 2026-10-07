@@ -393,10 +393,15 @@ export function rejectionFor(exec, reason) {
 		}
 		case "diagnosticsArgs":
 			return { field: 9, payload: new Writer().message(1, new Uint8Array(0)).finish() };
+		case "listMcpResourcesExecArgs":
+			// ListMcpResourcesExecResult|1 success|2 error|3 rejected — its own
+			// error arm is {error=1: string}, not McpResult's shape.
+			return { field: 17, payload: errorResult(2, reason) };
+		case "readMcpResourceExecArgs":
+			// ReadMcpResourceExecResult|1 success|2 error|3 rejected|4 not_found.
+			return { field: 18, payload: errorResult(2, reason) };
 		case "recordScreenArgs":
 		case "computerUseArgs":
-		case "listMcpResourcesExecArgs":
-		case "readMcpResourceExecArgs":
 			return { field: exec.field, payload: encodeMcpError(reason) };
 		default:
 			// An exec variant newer than this build. The generic error shape on the
@@ -607,6 +612,60 @@ export function decodeInteractionUpdate(bytes) {
 const EXEC_SPAN_CONTEXT_FIELD = 19;
 
 /**
+ * Every exec case this decoder names, with its wire field. The single source
+ * of truth for coverage: the diagnostics endpoint, the meta-tests and the
+ * documentation all derive from this table, so a case added to the decoder
+ * without a decision (translate / pass through / refuse) cannot hide — the
+ * coverage test fails until it is filed somewhere.
+ */
+export const EXEC_CASES = {
+	shellArgs: 2,
+	writeArgs: 3,
+	deleteArgs: 4,
+	grepArgs: 5,
+	readArgs: 7,
+	lsArgs: 8,
+	diagnosticsArgs: 9,
+	requestContextArgs: 10,
+	mcpArgs: 11,
+	shellStreamArgs: 14,
+	backgroundShellSpawnArgs: 16,
+	listMcpResourcesExecArgs: 17,
+	readMcpResourceExecArgs: 18,
+	fetchArgs: 20,
+	recordScreenArgs: 21,
+	computerUseArgs: 22,
+	writeShellStdinArgs: 23,
+	executeHookArgs: 27,
+	subagentArgs: 28,
+	redactedReadArgs: 29,
+	forceBackgroundShellArgs: 30,
+	forceBackgroundSubagentArgs: 31,
+	mcpStateExecArgs: 36,
+	subagentAwaitArgs: 37,
+	smartModeClassifierArgs: 38,
+	canvasDiagnosticsArgs: 40,
+	shellAllowlistPrecheckArgs: 41,
+	mcpAllowlistPrecheckArgs: 42,
+	webFetchAllowlistPrecheckArgs: 43,
+	gitDiffRequestArgs: 44,
+	piReadArgs: 45,
+	piBashArgs: 46,
+	piEditArgs: 47,
+	piWriteArgs: 48,
+	piGrepArgs: 49,
+	piFindArgs: 50,
+	piLsArgs: 51,
+	miniSweAgentBashArgs: 52,
+	conversationSearchArgs: 53,
+	agentStoreConflictArgs: 54,
+	adoptArgs: 56,
+};
+
+/** Execs that are not tool calls at all: served, never refused. */
+export const PASSTHROUGH_EXEC_CASES = new Set(["requestContextArgs", "mcpArgs"]);
+
+/**
  * ExecServerMessage — a request from Cursor's model for a tool to run.
  *
  * `case: "unknown"` deliberately preserves the message's own field number.
@@ -646,7 +705,8 @@ export function decodeExecServerMessage(bytes) {
 			// `readArgs` exec went entirely unanswered and hung the run: the
 			// refusal path had no slot to reply into, so nothing was sent.
 			// Decode the fields the translation layer needs, per Cursor's own arg
-			// schemas (ShellArgs|1 tool_call_id, ReadArgs|1 path|4 offset|5 limit,
+			// schemas (ShellArgs|1 command|2 working_directory|3 timeout,
+			// ReadArgs|1 path|4 offset|5 limit,
 			// GrepArgs|1 pattern|2 path|3 glob, WriteArgs|1 path|2 file_text,
 			// FetchArgs|1 url, BackgroundShellSpawnArgs|1 command, ...).
 			//
@@ -668,6 +728,11 @@ export function decodeExecServerMessage(bytes) {
 						else if (t2.field === 4) args.fourth = text;
 					} else if (t2.wireType === 0) {
 						args.fields[t2.field] = ar.varint();
+					} else if (t2.wireType === 1) {
+						// fixed64/double — PiBashExecArgs carries its timeout this
+						// way, and skipping wireType 1 here made that mapping dead
+						// code no unit test could see (the field was simply absent).
+						args.fields[t2.field] = ar.double();
 					} else {
 						ar.skip(t2.wireType);
 					}
@@ -1171,7 +1236,12 @@ export class AgentRun {
 	}
 
 	#write(payload) {
-		if (this.#closed || this.#stream.destroyed) return;
+		// `#ended` matters as much as closed/destroyed: after run.end() the
+		// stream is half-closed and any further write throws
+		// ERR_STREAM_WRITE_AFTER_END out of the run loop — which turned a late
+		// inbound frame (a KV blob request racing the end) into a 502 for every
+		// request after it. A late write after end is a no-op, not a throw.
+		if (this.#closed || this.#ended || this.#stream.destroyed) return;
 		this.#stream.write(frameEncode(payload));
 	}
 

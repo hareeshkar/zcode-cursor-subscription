@@ -52,19 +52,19 @@ tool; `→` marks a translation, anything else is the typed reply that keeps the
 
 | Cursor native tool | Field | What it does | Handling |
 |---|---|---|---|
-| `shell_args` | 2 | [Run a shell command] One command, captured output | → `Bash` |
+| `shell_args` | 2 | [Run a shell command] One command, captured output | → `Bash` (+ cwd prefix, `timeout`, `description`, `run_in_background`) |
 | `write_args` | 3 | [Write a file] Full-file write (`path`, `file_text`) | → `Write` (`file_path`, `content`) |
 | `delete_args` | 4 | [Delete a file] | Refused — no safe host delete |
-| `grep_args` | 5 | [Search file contents] Regex, output mode, case flag, limits | → `Grep` (`case_insensitive`→`-i`) |
+| `grep_args` | 5 | [Search file contents] Regex, output mode, context, type | → `Grep` (all flags incl. `-i`, `-B`/`-A`, `type`) |
 | `read_args` | 7 | [Read a file] Contents with offset/limit | → `Read` (`path`→`file_path`) |
 | `ls_args` | 8 | [List a directory] | → `Glob` (`pattern: "*"` synthesized) |
 | `diagnostics_args` | 9 | [Get code diagnostics] LSP errors/warnings | Refused — LSP is the host's |
 | `request_context_args` | 10 | [Ask what tools exist] The declaration handshake | Served: host tool schemas |
 | `mcp_args` | 11 | [Call a registered tool] The declared-tool channel | Passed through verbatim |
 | `shell_stream_args` | 14 | [Stream a shell command] Live stdout/stderr events | → `Bash` |
-| `background_shell_spawn_args` | 16 | [Spawn a background shell] Long-running process | → `Bash` (normal call) |
-| `list_mcp_resources_exec_args` | 17 | [List MCP resources] | Refused |
-| `read_mcp_resource_exec_args` | 18 | [Read an MCP resource] | Refused |
+| `background_shell_spawn_args` | 16 | [Spawn a background shell] Long-running process | → `Bash` (`run_in_background` forced) |
+| `list_mcp_resources_exec_args` | 17 | [List MCP resources] | Refused (typed error arm) |
+| `read_mcp_resource_exec_args` | 18 | [Read an MCP resource] | Refused (typed error arm) |
 | `fetch_args` | 20 | [Fetch a URL] | → `WebFetch` (`prompt` synthesized) |
 | `record_screen_args` | 21 | [Record the screen] | Refused — no screen access |
 | `computer_use_args` | 22 | [Drive the computer] Mouse/keyboard control | Refused |
@@ -75,7 +75,7 @@ tool; `→` marks a translation, anything else is the typed reply that keeps the
 | `force_background_shell_args` | 30 | [Background a shell] | Refused (typed) |
 | `force_background_subagent_args` | 31 | [Background a subagent] | Refused (typed) |
 | `mcp_state_exec_args` | 36 | [Poll MCP server state] | Refused (typed) |
-| `subagent_await_args` | 37 | [Await a subagent] | Refused (typed) |
+| `subagent_await_args` | 37 | [Await a subagent] Poll a background agent | → `TaskOutput` (`agent_id`→`task_id`) |
 | `smart_mode_classifier_args` | 38 | [Classify the request] Internal routing | Refused (typed) |
 | `canvas_diagnostics_args` | 40 | [Canvas diagnostics] | Refused (typed) |
 | `shell_allowlist_precheck_args` | 41 | [Precheck a command] "Pre-approved?" | Answered `allowlisted=false` |
@@ -122,8 +122,11 @@ legible typed reply instead of emitted and doomed.
 
 The argument-level detail — every rename, every synthesized field, every typed reply shape — is
 in [`docs/TRANSLATION-MAP.md`](../docs/TRANSLATION-MAP.md). The machine-readable contract is
-served live by the running shim at `GET /internal/translation`, and `/internal/status` counts
-translations per exec case, so you can always see which path a turn actually took.
+served live by the running shim at `GET /internal/translation` (derived from the implementation:
+supported, passthrough and refused cases, plus that process's translated/refused/repeated/dropped
+counts), and `/internal/status` carries the same counters with resume telemetry — so you can
+always see which path a turn actually took, and a model that regenerates the identical call is
+broken out of the loop with a legible advisory instead of burning quota.
 
 ### Context and cost
 

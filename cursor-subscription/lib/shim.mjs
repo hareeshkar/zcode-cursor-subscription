@@ -20,7 +20,7 @@
  */
 
 import { createServer } from "node:http";
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
@@ -43,6 +43,8 @@ import { buildRunRequest } from "./conversation.mjs";
 import { translateBuiltinExec, translationMap } from "./translate.mjs";
 import {
 	AgentRun,
+	EXEC_CASES,
+	PASSTHROUGH_EXEC_CASES,
 	decodeCheckpointUsedTokens,
 	decodeExecServerMessage,
 	decodeInteractionQuery,
@@ -255,6 +257,49 @@ export function portCandidates(preferred, { recorded, span = PORT_SCAN_RANGE } =
 	return out;
 }
 
+/**
+ * The text that ends a tool-call loop, pure so the behaviour is testable
+ * without a live run: it must name the call, state the count, and give the
+ * model a way forward — a bare refusal here would just be another loop.
+ */
+/**
+ * A stable per-conversation key: the system prompt plus the FIRST user
+ * message. Rounds of the same conversation append messages but never change
+ * these, so the key is invariant across rounds; different tasks (and
+ * subagents) start with different first messages, so their repeat budgets are
+ * independent. Pure and exported so the invariants are testable.
+ */
+export function conversationKeyOf(messages) {
+	const system = messages.find((m) => m?.role === "system");
+	const firstUser = messages.find((m) => m?.role === "user");
+	const seed = `${flattenContentLength(system?.content)}:${String(
+		typeof firstUser?.content === "string" ? firstUser.content : flattenText(firstUser?.content),
+	).slice(0, 200)}`;
+	return createHash("sha256").update(seed).digest("hex").slice(0, 16);
+}
+
+/** Flatten array-part content to text without importing conversation.mjs. */
+function flattenText(content) {
+	if (typeof content === "string") return content;
+	if (Array.isArray(content)) {
+		return content.map((p) => (typeof p?.text === "string" ? p.text : "")).join("");
+	}
+	return "";
+}
+
+function flattenContentLength(content) {
+	return flattenText(content ?? "").length;
+}
+
+export function repeatAdvisory(seen, toolName, argsText) {
+	return (
+		`Your tool call ${toolName}(${argsText.slice(0, 120)}) has already been executed ` +
+		`${seen} times with identical arguments, and its result is in your conversation history. ` +
+		"Do not call it again unchanged. Either continue from the result you already have, " +
+		"change the arguments meaningfully, or finish the task with your final answer."
+	);
+}
+
 export class CursorShim {
 	#store;
 	#auth;
@@ -266,7 +311,11 @@ export class CursorShim {
 	#preferredPort;
 	#adoptedPort = null;
 	#adoptionTimer;
-	#stats = { turns: 0, resumed: 0, replayed: 0, toolCalls: 0, toolRequests: 0, droppedToolCalls: 0, translated: {} };
+	#stats = { turns: 0, resumed: 0, replayed: 0, toolCalls: 0, toolRequests: 0, droppedToolCalls: 0, translated: {}, refused: {}, repeated: {} };
+	/** Tool-call signatures (name + arguments) this shim has delivered, ever. */
+	#repeatSignatures = new Map();
+	/** Identical deliveries allowed before the loop is broken with an advisory. */
+	static MAX_IDENTICAL_CALLS = 4;
 	// Liveness. There is no model-status endpoint in Cursor's protocol, so the
 	// only honest answer to "is the model stuck?" is when the last frame arrived
 	// and what we last did with it. Frames still arriving means the model is
@@ -343,6 +392,30 @@ export class CursorShim {
 	 * done with them: traffic means the model is working, silence right after
 	 * an exec we did not answer means it is waiting on us.
 	 */
+	/**
+	 * Loop protection across rounds. A model that regenerates the identical
+	 * tool call — same tool, same arguments — is not making progress, whatever
+	 * the cause (lost history upstream, a wedged plan, a validation error it
+	 * cannot read). Past the cap the call is not delivered again; the turn
+	 * completes as plain text telling the model exactly that, so it can finish
+	 * or change approach instead of burning quota forever.
+	 *
+	 * @returns {string | null} the advisory text when the loop must break.
+	 */
+	#registerCall(conversationKey, execCase, toolName, argsText) {
+		// Scoped per conversation: a process-lifetime map poisoned every later
+		// task — its FIRST call to a file a previous conversation had saturated
+		// hit the cap instantly. A fresh conversation legitimately re-reads the
+		// same files; identical-within-one-conversation is the loop signal.
+		const signature = `${conversationKey}:${toolName}:${argsText}`;
+		const seen = (this.#repeatSignatures.get(signature) ?? 0) + 1;
+		this.#repeatSignatures.set(signature, seen);
+		if (seen < CursorShim.MAX_IDENTICAL_CALLS) return null;
+		this.#stats.repeated[execCase] = (this.#stats.repeated[execCase] ?? 0) + 1;
+		this.log("breaking identical tool-call loop", `${toolName} delivered ${seen} times with identical arguments`);
+		return repeatAdvisory(seen, toolName, argsText);
+	}
+
 	metrics() {
 		return {
 			...this.#stats,
@@ -377,7 +450,7 @@ export class CursorShim {
 	}
 
 	resetMetrics() {
-		this.#stats = { turns: 0, resumed: 0, replayed: 0, toolCalls: 0, toolRequests: 0, droppedToolCalls: 0, translated: {} };
+		this.#stats = { turns: 0, resumed: 0, replayed: 0, toolCalls: 0, toolRequests: 0, droppedToolCalls: 0, translated: {}, refused: {}, repeated: {} };
 		this.#liveness = { frames: 0, lastFrameAt: 0, lastAction: "none" };
 		this.#unknownFrames.clear();
 		this.#unanswered.clear();
@@ -616,12 +689,33 @@ export class CursorShim {
 			return;
 		}
 		if (url.pathname === "/internal/translation" && request.method === "GET") {
-			// The live translation contract: which Cursor exec cases this build
-			// can translate, into which host tools, with which argument renames.
-			// A future dig reads what the RUNNING shim does, not what a document
-			// said at some point.
+			// The live translation contract, DERIVED from the implementation so it
+			// cannot go stale: which exec cases translate into which host tools
+			// with which renames, which are served passthrough, and which are
+			// refused with a typed reply — plus the serving process's own counts,
+			// so the diagnostics describe THIS shim, not a different one.
+			const supported = translationMap().execCases;
+			const unsupported = {};
+			for (const [name, field] of Object.entries(EXEC_CASES)) {
+				if (supported[name] || PASSTHROUGH_EXEC_CASES.has(name)) continue;
+				unsupported[name] = { field, reply: "typed refusal on the exec's own field" };
+			}
 			response.writeHead(200, { "content-type": "application/json" });
-			response.end(JSON.stringify({ version: SHIM_VERSION, ...translationMap() }));
+			response.end(
+				JSON.stringify({
+					pid: process.pid,
+					version: SHIM_VERSION,
+					execCases: supported,
+					passthrough: [...PASSTHROUGH_EXEC_CASES],
+					refused: unsupported,
+					counts: {
+						translated: this.#stats.translated,
+						refused: this.#stats.refused,
+						repeated: this.#stats.repeated,
+						droppedToolCalls: this.#stats.droppedToolCalls,
+					},
+				}),
+			);
 			return;
 		}
 		if (url.pathname === "/health" && request.method === "GET") {
@@ -790,7 +884,9 @@ export class CursorShim {
 				...[...toolNames].map((name) => `- ${name}`),
 				"",
 				"Call them by these exact names as ordinary function calls, with the parameters",
-				"defined in each tool's schema.",
+				"defined in each tool's schema. When a call is rejected by validation, the error",
+				"names the exact parameter — fix that parameter and continue; never resend an",
+				"unchanged call you have already made, its result is in your history.",
 			]
 				.filter((part) => part.length > 0)
 				.join("\n");
@@ -842,7 +938,7 @@ export class CursorShim {
 	 * permission prompts. ZCode cannot answer mid-stream, so the alternative
 	 * would be executing tools inside the shim and bypassing its prompts.
 	 */
-	async #collect(runRequest, tools, accessToken, blobStore, onDelta, toolNames, declared) {
+	async #collect(runRequest, tools, accessToken, blobStore, onDelta, toolNames, declared, conversationKey = "default") {
 		const run = new AgentRun(accessToken);
 		await run.start({ runRequestBytes: runRequest, tools });
 
@@ -853,6 +949,12 @@ export class CursorShim {
 		// `undefined`, not `null`: `#commit` tests `!== undefined`, so a `null`
 		// sentinel made every turn look like a terminal tool call.
 		let toolCall;
+		// Set when the loop-break advisory ends the run instead of a tool call.
+		// Both leave the frames loop together: continuing to read after
+		// run.end() means a late inbound frame needing a reply would write to a
+		// half-closed stream — the write-after-end 502 that once poisoned every
+		// request after it.
+		let endedByAdvisory = false;
 		let completionTokens = 0;
 		let promptTokens = 0;
 		let checkpoint;
@@ -978,6 +1080,13 @@ export class CursorShim {
 							// server-side, and the next ZCode turn resumes it from the
 							// checkpoint with the tool result attached.
 							this.#stats.toolRequests += 1;
+							const advisory = this.#registerCall(conversationKey, exec.case, exec.args?.toolName ?? "", JSON.stringify(exec.args?.args ?? {}));
+							if (advisory) {
+								text = advisory;
+								endedByAdvisory = true;
+								run.end();
+								break;
+							}
 							toolCall = exec;
 							run.end();
 							break;
@@ -1008,6 +1117,13 @@ export class CursorShim {
 						// the typed refusal follow — naming the tools that do exist.
 						const translated = translateBuiltinExec(exec, toolNames, declared);
 						if (translated) {
+							const advisory = this.#registerCall(conversationKey, exec.case, translated.toolName, translated.arguments);
+							if (advisory) {
+								text = advisory;
+								endedByAdvisory = true;
+								run.end();
+								break;
+							}
 							// Counted by exec case, separately from mcp_args tool calls: the
 							// two paths are indistinguishable from the host side, and without
 							// this a regression in either one reads as "tools work" or "tools
@@ -1037,6 +1153,7 @@ export class CursorShim {
 						const rejection = rejectionFor(exec, reason);
 						if (rejection) {
 							refusals[exec.field] = (refusals[exec.field] ?? 0) + 1;
+							this.#stats.refused[exec.case] = (this.#stats.refused[exec.case] ?? 0) + 1;
 							run.writeMessage(
 								encodeExecClientMessageEnvelope(
 									encodeExecClientMessage(exec.id, exec.execId, rejection.field, rejection.payload),
@@ -1053,7 +1170,7 @@ export class CursorShim {
 						continue;
 					}
 				}
-				if (toolCall) break;
+				if (toolCall || endedByAdvisory) break;
 			}
 		} finally {
 			run.close();
@@ -1194,7 +1311,7 @@ export class CursorShim {
 		try {
 			result = await this.#collect(runRequest, tools, accessToken, ctx.blobStore, ({ kind, text }) => {
 				sendDelta(kind === "text" ? { content: text } : { reasoning_content: text });
-			}, ctx.toolNames, ctx.declared);
+			}, ctx.toolNames, ctx.declared, conversationKeyOf(ctx.messages));
 		} catch (error) {
 			// A business error inside a 200 SSE body — but the envelope must be FLAT.
 			// ZCode's chunk union accepts `choices: array` OR `error: string`; the
@@ -1234,7 +1351,7 @@ export class CursorShim {
 	async #complete(response, runRequest, tools, accessToken, ctx) {
 		let result;
 		try {
-			result = await this.#collect(runRequest, tools, accessToken, ctx.blobStore, undefined, ctx.toolNames, ctx.declared);
+			result = await this.#collect(runRequest, tools, accessToken, ctx.blobStore, undefined, ctx.toolNames, ctx.declared, conversationKeyOf(ctx.messages));
 		} catch (error) {
 			response.writeHead(502, { "content-type": "application/json" });
 			response.end(

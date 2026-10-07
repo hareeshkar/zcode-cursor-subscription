@@ -60,6 +60,34 @@ function shq(value) {
 	return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
+/**
+ * The shell capability, shared by shellArgs, shellStreamArgs and
+ * backgroundShellSpawnArgs. ShellArgs | 1 command | 2 working_directory |
+ * 3 timeout (ms) | 11 is_background | 15 description — every one has a home
+ * in ZCode's Bash; the working directory has none, so it becomes a `cd` prefix,
+ * the standard technique (the git-diff translation does the same with -C).
+ */
+const SHELL_CAPABILITY = {
+	names: ["Bash", "Shell"],
+	build: (a) => {
+		const command = a.fields?.[1] ?? a.primary ?? "";
+		const cwd = stringOf(a.fields?.[2]);
+		const timeout = numberOf(a.fields?.[3]);
+		return {
+			command: cwd ? `cd ${shq(cwd)} && ${command}` : command,
+			timeout: timeout === undefined ? undefined : Math.min(timeout, 600_000),
+			description: stringOf(a.fields?.[15]),
+			run_in_background: booleanOf(a.fields?.[11]),
+		};
+	},
+	aliases: {
+		command: ["command"],
+		timeout: ["timeout"],
+		description: ["description"],
+		run_in_background: ["run_in_background"],
+	},
+};
+
 /** Sanitize Cursor's execId into a safe OpenAI tool_call id. */
 function sanitizedCallId(execId) {
 	// Cursor's execId joins two ids with a literal newline; a control character
@@ -97,9 +125,10 @@ const CAPABILITY = {
 	// shares the ReadArgs schema: the host is the executor either way.
 	readArgs: READ_CAPABILITY,
 	redactedReadArgs: READ_CAPABILITY,
-	// GrepArgs | 1 pattern | 2 path | 3 glob | 4 output_mode | 8
-	// case_insensitive | 10 head_limit | 11 multiline | 16 offset. ZCode's Grep
-	// spells the case flag `-i`; everything else shares its name.
+	// GrepArgs | 1 pattern | 2 path | 3 glob | 4 output_mode | 5 context_before
+	// | 6 context_after | 7 context | 8 case_insensitive | 9 type |
+	// 10 head_limit | 11 multiline | 16 offset. ZCode's Grep spells the case
+	// flag `-i`; everything else shares its name.
 	grepArgs: {
 		names: ["Grep"],
 		build: (a) => ({
@@ -107,18 +136,28 @@ const CAPABILITY = {
 			path: stringOf(a.fields?.[2] ?? a.second),
 			glob: stringOf(a.fields?.[3] ?? a.third),
 			output_mode: enumOf(a.fields?.[4], ["content", "files_with_matches", "count"]),
+			"-B": numberOf(a.fields?.[5]),
+			"-A": numberOf(a.fields?.[6]),
+			context: numberOf(a.fields?.[7]),
 			"-i": booleanOf(a.fields?.[8]),
+			type: stringOf(a.fields?.[9]),
 			head_limit: numberOf(a.fields?.[10]),
 			multiline: booleanOf(a.fields?.[11]),
+			offset: numberOf(a.fields?.[16]),
 		}),
 		aliases: {
 			pattern: ["pattern", "query"],
 			path: ["path"],
 			glob: ["glob", "include"],
 			output_mode: ["output_mode"],
+			"-B": ["-B"],
+			"-A": ["-A"],
+			context: ["context", "-C"],
 			"-i": ["-i", "case_insensitive"],
+			type: ["type"],
 			head_limit: ["head_limit"],
 			multiline: ["multiline"],
+			offset: ["offset"],
 		},
 	},
 	// LsArgs | 1 path. Glob is the listing tool; it needs a pattern Cursor never
@@ -131,20 +170,17 @@ const CAPABILITY = {
 		},
 		aliases: { pattern: ["pattern"], path: ["path"], command: ["command"] },
 	},
-	shellArgs: {
-		names: ["Bash", "Shell"],
-		build: (a) => ({ command: a.fields?.[1] ?? a.primary ?? "" }),
-		aliases: { command: ["command"] },
-	},
-	shellStreamArgs: {
-		names: ["Bash", "Shell"],
-		build: (a) => ({ command: a.fields?.[1] ?? a.primary ?? "" }),
-		aliases: { command: ["command"] },
-	},
+	shellArgs: SHELL_CAPABILITY,
+	shellStreamArgs: SHELL_CAPABILITY,
+	// A spawn IS a background request: run_in_background is forced true so a
+	// dev server or watch command cannot block the turn. ZCode's TaskOutput
+	// tool is how the model would poll it later.
 	backgroundShellSpawnArgs: {
-		names: ["Bash"],
-		build: (a) => ({ command: a.fields?.[1] ?? a.primary ?? "" }),
-		aliases: { command: ["command"] },
+		...SHELL_CAPABILITY,
+		build: (a) => ({
+			...SHELL_CAPABILITY.build(a),
+			run_in_background: true,
+		}),
 	},
 	// WriteArgs | 1 path | 2 file_text.
 	writeArgs: {
@@ -185,6 +221,18 @@ const CAPABILITY = {
 			subagent_type: ["subagent_type", "agent_type"],
 			run_in_background: ["run_in_background"],
 		},
+	},
+	// SubagentAwaitArgs | 1 agent_id | 2 timeout_ms — the same shape as the
+	// host's TaskOutput {task_id, block, timeout}, not an approximation: it is
+	// how a model polls a subagent it dispatched in the background.
+	subagentAwaitArgs: {
+		names: ["TaskOutput"],
+		build: (a) => ({
+			task_id: stringOf(a.fields?.[1]),
+			block: true,
+			timeout: numberOf(a.fields?.[2]) ?? 30_000,
+		}),
+		aliases: { task_id: ["task_id"], block: ["block"], timeout: ["timeout"] },
 	},
 	// --- Cursor's "pi" tool family (fields 45-51): a second, simpler set of
 	// tool execs with its own arg numbering. Every one maps onto the same host

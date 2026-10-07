@@ -155,6 +155,33 @@ reading the code. Calls now render as `[TOOL CALL] <name> <args>` and results as
 `[TOOL RESULT (<tool>)]`, with tests for the arguments-missing case so the name
 cannot be lost one level down.
 
+### The eighth defect: writes after the run ended, and a loop budget with no conversation
+
+`ERR_STREAM_WRITE_AFTER_END` — the failure that killed two Advisor runs at the
+start of this project — was finally reproduced deterministically and root-caused.
+It was never the SSE response writer (the original hypothesis). Two faults,
+both latent until the loop guard exposed them:
+
+1. **`AgentRun.#write` treated only `closed`/`destroyed` as terminal.** After
+   `run.end()` half-closes the HTTP/2 stream, neither flag is set — so any
+   LATE reply (a KV blob request or exec racing the end) called
+   `stream.write()` on an ended stream and threw out of the run loop, turning a
+   benign racing frame into a 502. Writes after end are now no-ops.
+2. **The advisory path ended the run but kept reading frames.** The tool-call
+   paths set `toolCall` so the frames loop breaks; the advisory set only text,
+   the loop continued over a half-closed stream, and the next reply-write hit
+   fault 1. The loop now exits on an advisory exactly as it does on a tool call.
+3. **The repeat budget was process-lifetime-scoped.** After one conversation
+   saturated a signature, every LATER conversation's first identical call hit
+   the cap instantly — a 502 on round one for each model after the first.
+   Budgets are now scoped by `conversationKeyOf(messages)` (system prompt +
+   first user message — invariant across rounds, unique per task), with the
+   invariants unit-tested.
+
+The general lesson, third of its family: ending a run is a protocol act with
+three coupled obligations — stop reading, stop writing, and remember that a
+NEW conversation may legitimately repeat what an OLD one did.
+
 ### The sixth defect: translated calls used Cursor's parameter names, and the host rejected every one
 
 The built-in-to-host translation (readArgs → Read, writeArgs → Write, ...)
@@ -195,6 +222,30 @@ Verified live on the serving shim (0.21.1): `grok-4.7-high-fast` and
 `translated built-in exec` log line are permanent: without them the two paths
 are indistinguishable from the host side, and a regression in either reads as
 "tools broken" with no way to tell which path went silent.
+
+### The seventh defect: continuation turns sent results without the actions that produced them
+
+Every deep agent loop blind-looped: on a continuation turn (the request ends
+with a tool result, no new user message), the action text carried the original
+task plus quoted tool results — but **not `cold.history`**. The transcript of
+the model's own prior calls was silently dropped on that branch only; the
+normal path included it. So on round N a model received results with no record
+of the reads it had already made, and re-issued the same Read on every round —
+four to seven identical reads of one file, live, across every model family,
+while a two-turn probe (which never hits the branch) kept passing.
+
+Found by the first five-model agentic workload, and pinned by the experiments
+that followed: a pre-loaded four-round history answered perfectly (proving the
+renderer), a live three-round loop answered perfectly on the fixed build
+(proving the wire), and the driver still looping was prompt-interaction, not
+transport. The fix includes the diagnosis lesson: **a two-turn probe cannot
+certify a continuation path** — the branch only executes when the last message
+is a tool result, so the regression test builds exactly that shape.
+
+The same branch also re-quoted *every* prior result on every round (doubling
+the action each time) and left results nameless when the host sends only
+`tool_call_id` — now only the newest round is quoted, with names paired by
+call id.
 
 ---
 

@@ -32,7 +32,12 @@ Two rules make a translation first-class, and both are enforced in code
 
 The machine-readable version of this table is served live by the running shim
 at `GET /internal/translation` — read that when you want what the code does
-*today*; read this page for the reasoning.
+*today*; read this page for the reasoning. The endpoint is DERIVED from the
+implementation (`EXEC_CASES` minus the translation map minus passthrough), and
+carries the serving process's pid, version, and its own translated / refused /
+repeated / dropped counts — so it describes the shim that is actually serving,
+never a different or adopted process. `/internal/status` carries the same
+counters alongside resume telemetry.
 
 ---
 
@@ -45,7 +50,7 @@ that keeps the run alive.
 
 | Cursor native tool | Field | What it does | Handling |
 |---|---|---|---|
-| `shell_args` | 2 | [Run a shell command] Execute one command synchronously and return stdout/stderr/exit code. | → `Bash` (`command`) |
+| `shell_args` | 2 | [Run a shell command] Execute one command synchronously and return stdout/stderr/exit code. | → `Bash` (`command`; `working_directory`→`cd 'dir' &&` prefix, `timeout` clamped to 600s, `description`, `is_background`→`run_in_background`) |
 | `write_args` | 3 | [Write a file] Create or overwrite a file with full contents (`path`, `file_text`). | → `Write` (`file_path`, `content`) |
 | `delete_args` | 4 | [Delete a file] Remove a file from the workspace. | Refused: `DeleteResult.rejected=6` — no safe host delete |
 | `grep_args` | 5 | [Search file contents] Regex search across files with output mode, case flag, head limit, multiline. | → `Grep` (flags incl. `case_insensitive`→`-i`) |
@@ -56,8 +61,8 @@ that keeps the run alive.
 | `mcp_args` | 11 | [Call a registered tool] Invoke one of the MCP tools the client declared — the declared-tool channel. | Passed through verbatim (already host-shaped) |
 | `shell_stream_args` | 14 | [Stream a shell command] Run a command and stream stdout/stderr events live. | → `Bash` (`command`) |
 | `background_shell_spawn_args` | 16 | [Spawn a background shell] Start a long-running process (dev server, watch) addressable later. | → `Bash` (runs as a normal call) |
-| `list_mcp_resources_exec_args` | 17 | [List MCP resources] Enumerate resources exposed by MCP servers. | Refused: `McpResult.error` |
-| `read_mcp_resource_exec_args` | 18 | [Read an MCP resource] Fetch one MCP resource's contents. | Refused: `McpResult.error` |
+| `list_mcp_resources_exec_args` | 17 | [List MCP resources] Enumerate resources exposed by MCP servers. | Refused: own `error=2` arm (`{error}`) |
+| `read_mcp_resource_exec_args` | 18 | [Read an MCP resource] Fetch one MCP resource's contents. | Refused: own `error=2` arm (a `not_found=4` arm also exists) |
 | `fetch_args` | 20 | [Fetch a URL] Retrieve a web page. | → `WebFetch` (`url`; `prompt` synthesized — host-required) |
 | `record_screen_args` | 21 | [Record the screen] Screen capture via accessibility APIs. | Refused: `McpResult.error` — no screen access |
 | `computer_use_args` | 22 | [Drive the computer] Mouse/keyboard control of the desktop. | Refused: `McpResult.error` |
@@ -68,7 +73,7 @@ that keeps the run alive.
 | `force_background_shell_args` | 30 | [Background a shell] Move a running shell to the background. | Refused: generic — no host mechanism |
 | `force_background_subagent_args` | 31 | [Background a subagent] Move a running subagent to the background. | Refused: generic |
 | `mcp_state_exec_args` | 36 | [Poll MCP server state] Check whether MCP servers are alive. (Long misread as "provider routing" — its `server_identifiers` named our provider.) | Refused: generic (proven to resume the run) |
-| `subagent_await_args` | 37 | [Await a subagent] Wait for a background subagent's result. | Refused: generic |
+| `subagent_await_args` | 37 | [Await a subagent] Wait for a background subagent's result. | → `TaskOutput` (`agent_id`→`task_id`, `timeout_ms`→`timeout`, `block` synthesized true) |
 | `smart_mode_classifier_args` | 38 | [Classify the request] Internal smart-mode routing classifier. | Refused: generic |
 | `canvas_diagnostics_args` | 40 | [Canvas diagnostics] Diagnostics for Cursor's canvas feature. | Refused: generic |
 | `shell_allowlist_precheck_args` | 41 | [Precheck a command] "Is this command pre-approved?" before running it. | Answered: flat `allowlisted=false` — the host's permission system is the allowlist |
@@ -76,7 +81,7 @@ that keeps the run alive.
 | `web_fetch_allowlist_precheck_args` | 43 | [Precheck a fetch] Same, for URL fetches. | Answered: `allowlisted=false` |
 | `git_diff_request` | 44 | [Show a git diff] Structured diff request: cwd, refs, paths, context lines. | → `Bash` (synthesized, shell-quoted `git diff`) |
 | `pi_read_args` | 45 | [Read a file] Pi family: same primitive, simpler args. | → `Read` |
-| `pi_bash_args` | 46 | [Run a command] Pi family, with a timeout field. | → `Bash` (`timeout` carried) |
+| `pi_bash_args` | 46 | [Run a command] Pi family, with a timeout field (fixed64 double on the wire). | → `Bash` (`timeout` carried — decoding wireType 1 is what makes it live) |
 | `pi_edit_args` | 47 | [Edit by replacement] One file, a list of `{old_text, new_text}` replacements. | → `Edit` for a single replacement; multi-edit refused rather than lose all but the first |
 | `pi_write_args` | 48 | [Write a file] Pi family. | → `Write` |
 | `pi_grep_args` | 49 | [Search file contents] Pi family, with ignore-case, context and limit. | → `Grep` (`ignore_case`→`-i`, `literal` dropped) |
@@ -204,3 +209,16 @@ list of tools it *can* call, and the run continues.
 | Every translation is counted and logged (`translated` map, `translated built-in exec …`) | `/internal/status`, shim stderr |
 | The live contract is inspectable | `GET /internal/translation` |
 | Schemas in tests are ZCode's real ones, copied from `apps/zcode-cli/packages/contracts` | `test/exec-handling.test.mjs` fixture |
+
+
+## Loop protection
+
+A model that regenerates the *identical* tool call — same tool, same arguments
+— is not making progress, whatever the cause. The shim counts every delivered
+call signature; past four identical deliveries it does not deliver again. The
+turn completes as plain text naming the call, the count, and a way forward
+(continue from the existing result, change the arguments, or finish). The
+`repeated` counter in `/internal/status` and `/internal/translation` counts
+every break. Refused execs are counted per case in `refused`, dropped calls in
+`droppedToolCalls` — four separate instruments, because "the model asked" and
+"the call was delivered" and "the host executed it" are three different facts.

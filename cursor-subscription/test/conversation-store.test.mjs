@@ -404,3 +404,37 @@ test("probe selection is not hardcoded to one model", async () => {
 	const picked = pickProbeModels(["brand-new-small-a", "brand-new-flash-low"], { limit: 4 });
 	assert.deepEqual(picked.sort(), ["brand-new-flash-low", "brand-new-small-a"]);
 });
+
+test("a continuation turn carries the model's own history, not just bare results", () => {
+	// The regression that broke every deep agent loop: when the last message
+	// was a tool result, the action sent the original task plus quoted results
+	// but DROPPED the transcript — so on round N the model had results with no
+	// record of the calls it had already made, and re-issued the same read on
+	// every round (four identical Reads of one file, live, across families).
+	const messages = [
+		{ role: "system", content: "sys" },
+		{ role: "user", content: "refactor app.js" },
+		{ role: "assistant", content: null, tool_calls: [{ id: "c1", function: { name: "Read", arguments: '{"file_path":"app.js"}' } }] },
+		{ role: "tool", tool_call_id: "c1", content: "first read result" },
+		{ role: "assistant", content: null, tool_calls: [{ id: "c2", function: { name: "Read", arguments: '{"file_path":"app.js"}' } }] },
+		{ role: "tool", tool_call_id: "c2", content: "second read result" },
+	];
+	const request = buildRunRequest({ messages, blobStore: new Map(), model: "m" });
+
+	// AgentRunRequest.action = 2 → UserMessageAction(1) → UserMessage(1) → text(1)
+	const action = readFields(request).find((f) => f.field === 2).bytes;
+	const step = readFields(action).find((f) => f.field === 1).bytes;
+	const userMessage = readFields(step).find((f) => f.field === 1).bytes;
+	const text = new TextDecoder().decode(readFields(userMessage).find((f) => f.field === 1).bytes);
+
+	assert.ok(text.includes("refactor app.js"), "the original request travels");
+	assert.ok(text.includes("[TOOL CALL] Read"), "the model's own prior calls travel");
+	assert.ok(text.includes("first read result"), "earlier results stay in the transcript");
+	assert.ok(text.includes("[Read result]"), "the newest result is quoted with its tool name, paired by call id");
+	assert.ok(!text.includes("[tool result]"), "no nameless fallback when the id pairs");
+	assert.ok(
+		text.indexOf("first read result") < text.indexOf("second read result"),
+		"history precedes the quoted newest round",
+	);
+	assert.ok(text.includes("Do not repeat a call you already made"));
+});

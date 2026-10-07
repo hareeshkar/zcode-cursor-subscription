@@ -399,26 +399,52 @@ export function buildRunRequest({ messages, checkpoint, blobStore, model, extraS
 			for (const [key, value] of cold.blobStore) blobStore.set(key, value);
 		}
 		// A history ending on a tool result has no new user turn. The transcript
-		// carries the call and its result, but some models (observed: gemini,
-		// composer) re-call the tool anyway unless the result is in the action
-		// itself. Quoting the pending results there makes the continuation
-		// unmissable: the model is asked to answer using text it can see directly.
+		// (`cold.history`) carries every prior round — the model's own calls and
+		// their results, framed as its own turns — and it MUST travel on this
+		// path too. This branch used to send only the original task plus bare
+		// quoted results: on round N a model saw results with no record of the
+		// actions it had already taken, so it re-issued the same read on every
+		// round — four identical Reads of one file, live, across every family.
 		if (messages[messages.length - 1]?.role === "tool") {
-			const pending = [];
+			// Resolve a result's tool name by pairing it with the assistant call
+			// that produced it — hosts send role:"tool" messages with only a
+			// tool_call_id, so a bare "[tool result]" is the best a nameless
+			// fallback can do, and the model cannot tell which result is which.
+			const namesById = new Map();
 			for (const message of messages) {
+				for (const call of Array.isArray(message?.tool_calls) ? message.tool_calls : []) {
+					if (call?.id && call?.function?.name) namesById.set(call.id, call.function.name);
+				}
+			}
+			// Quote only the newest round's results: the transcript above already
+			// carries every earlier one, and re-quoting all of them doubled the
+			// action on every round.
+			let lastCallIndex = -1;
+			for (let i = messages.length - 1; i >= 0; i -= 1) {
+				const calls = messages[i]?.tool_calls;
+				if (messages[i]?.role === "assistant" && Array.isArray(calls) && calls.length > 0) {
+					lastCallIndex = i;
+					break;
+				}
+			}
+			const pending = [];
+			for (let i = lastCallIndex + 1; i < messages.length; i += 1) {
+				const message = messages[i];
 				if (message?.role !== "tool") continue;
 				const { text } = flattenContent(message.content);
 				if (text.trim().length === 0) continue;
-				const name = typeof message.tool_name === "string" ? message.tool_name : "tool";
+				const name = namesById.get(message.tool_call_id) ?? (typeof message.tool_name === "string" ? message.tool_name : "tool");
 				pending.push(`[${name} result]\n${text.trim()}`);
 			}
 			actionText = [
+				cold.history,
+				"",
 				cold.lastUser,
 				"",
-				"(Your tool calls above have already run. Their results, quoted for you:",
+				"(Your newest tool calls have already run. Their results, quoted for you:",
 				...pending,
 				")",
-				"Answer the user's request using these results. Do not call the same tools again.",
+				"Answer the user's request using these results and your history above. Do not repeat a call you already made.",
 			]
 				.filter((part) => part.length > 0)
 				.join("\n");

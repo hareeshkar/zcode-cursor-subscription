@@ -674,14 +674,15 @@ import { translateBuiltinExec } from "../lib/translate.mjs";
 // failed validation — the host requires `file_path`. A fixture that does not
 // match the host is a blind instrument: it passes the tests and proves nothing.
 const HOST_TOOLS = [
-  { function: { name: "Bash", parameters: { type: "object", properties: { command: { type: "string" }, timeout: { type: "number" } }, required: ["command"] } } },
+  { function: { name: "Bash", parameters: { type: "object", properties: { command: { type: "string" }, timeout: { type: "number" }, description: { type: "string" }, run_in_background: { type: "boolean" } }, required: ["command"] } } },
   { function: { name: "Read", parameters: { type: "object", properties: { file_path: { type: "string" }, offset: { type: "number" }, limit: { type: "number" } }, required: ["file_path"] } } },
-  { function: { name: "Grep", parameters: { type: "object", properties: { pattern: { type: "string" }, path: { type: "string" }, glob: { type: "string" }, output_mode: { type: "string", enum: ["content", "files_with_matches", "count"] }, "-i": { type: "boolean" }, head_limit: { type: "number" }, multiline: { type: "boolean" }, context: { type: "number" } }, required: ["pattern"] } } },
+  { function: { name: "Grep", parameters: { type: "object", properties: { pattern: { type: "string" }, path: { type: "string" }, glob: { type: "string" }, output_mode: { type: "string", enum: ["content", "files_with_matches", "count"] }, "-B": { type: "number" }, "-A": { type: "number" }, context: { type: "number" }, "-i": { type: "boolean" }, type: { type: "string" }, head_limit: { type: "number" }, multiline: { type: "boolean" }, offset: { type: "number" } }, required: ["pattern"] } } },
   { function: { name: "Write", parameters: { type: "object", properties: { file_path: { type: "string" }, content: { type: "string" } }, required: ["file_path", "content"] } } },
   { function: { name: "Edit", parameters: { type: "object", properties: { file_path: { type: "string" }, old_string: { type: "string" }, new_string: { type: "string" }, replace_all: { type: "boolean" } }, required: ["file_path", "old_string", "new_string"] } } },
   { function: { name: "WebFetch", parameters: { type: "object", properties: { url: { type: "string" }, prompt: { type: "string" } }, required: ["url", "prompt"] } } },
   { function: { name: "Glob", parameters: { type: "object", properties: { pattern: { type: "string" }, path: { type: "string" } }, required: ["pattern"] } } },
   { function: { name: "Agent", parameters: { type: "object", properties: { description: { type: "string" }, prompt: { type: "string" }, subagent_type: { type: "string" }, run_in_background: { type: "boolean" } }, required: ["description", "prompt"] } } },
+  { function: { name: "TaskOutput", parameters: { type: "object", properties: { task_id: { type: "string" }, block: { type: "boolean" }, timeout: { type: "number" } }, required: ["task_id", "block", "timeout"] } } },
 ];
 const HOST_NAMES = new Set(HOST_TOOLS.map((t) => t.function.name));
 
@@ -1043,9 +1044,99 @@ test("the translation map is inspectable: every case names its tools and renames
   assert.equal(map.execCases.readArgs.args.file_path.to, "file_path");
   assert.deepEqual(map.execCases.readArgs.args.file_path.fallbacks, ["path"]);
   assert.equal(map.execCases.fetchArgs.args.prompt.to, "prompt", "synthesized fields appear too");
-  for (const required of ["grepArgs", "subagentArgs", "piEditArgs", "gitDiffRequestArgs"]) {
+  for (const required of ["grepArgs", "subagentArgs", "subagentAwaitArgs", "piEditArgs", "gitDiffRequestArgs"]) {
     assert.ok(map.execCases[required], `${required} is in the live contract`);
   }
+});
+
+// --- review findings: decoded-but-dropped arguments that had homes ----------
+
+test("shell execs carry working_directory, timeout, description and is_background", () => {
+  // ShellArgs | 1 command | 2 working_directory | 3 timeout | 11 is_background
+  // | 15 description. ZCode's Bash has no cwd parameter, so the directory
+  // becomes a quoted `cd` prefix; everything else maps by name.
+  const exec = decodeExecServerMessage(
+    execFrame({
+      fields: [[2, new Writer()
+        .string(1, "npm test")
+        .string(2, "/repo/pkg")
+        .varint(3, 900000)
+        .varint(11, 1)
+        .string(15, "run the suite")
+        .finish()]],
+    }),
+  );
+  assert.equal(exec.case, "shellArgs");
+  const translated = translateBuiltinExec(exec, HOST_NAMES, HOST_TOOLS);
+  const args = JSON.parse(translated.arguments);
+  assert.equal(args.command, "cd '/repo/pkg' && npm test");
+  assert.equal(args.timeout, 600000, "clamped to the host's 600s cap, not dropped");
+  assert.equal(args.description, "run the suite");
+  assert.equal(args.run_in_background, true);
+});
+
+test("a background spawn is forced to run_in_background", () => {
+  // A spawn IS a background request; running it foreground would block the
+  // turn on a dev server.
+  const translated = translateBuiltinExec(
+    { case: "backgroundShellSpawnArgs", field: 16, args: { fields: { 1: "npm run dev" } } },
+    HOST_NAMES, HOST_TOOLS,
+  );
+  assert.equal(JSON.parse(translated.arguments).run_in_background, true);
+});
+
+test("grep's context, type and offset fields find their homes", () => {
+  // GrepArgs | 5 context_before | 6 context_after | 7 context | 9 type | 16 offset.
+  const translated = translateBuiltinExec(
+    { case: "grepArgs", field: 5, args: { fields: { 1: "TODO", 5: 2, 6: 4, 7: 3, 9: "ts", 16: 10 } } },
+    HOST_NAMES, HOST_TOOLS,
+  );
+  const args = JSON.parse(translated.arguments);
+  assert.equal(args["-B"], 2);
+  assert.equal(args["-A"], 4);
+  assert.equal(args.context, 3);
+  assert.equal(args.type, "ts");
+  assert.equal(args.offset, 10);
+});
+
+test("pi_bash's timeout is a double on the wire and survives decoding", () => {
+  // PiBashExecArgs|2 timeout 1? — wire type 1 (fixed64). The args reader used
+  // to skip wireType 1 entirely, so the documented timeout mapping was dead
+  // code: the field was simply never populated.
+  const exec = decodeExecServerMessage(
+    execFrame({ fields: [[46, new Writer().string(1, "sleep 1").double(2, 45000).finish()]] }),
+  );
+  assert.equal(exec.case, "piBashArgs");
+  assert.equal(exec.args.fields[2], 45000, "the double is decoded, not skipped");
+  const translated = translateBuiltinExec(exec, HOST_NAMES, HOST_TOOLS);
+  assert.equal(JSON.parse(translated.arguments).timeout, 45000);
+});
+
+test("awaiting a subagent becomes the host's TaskOutput", () => {
+  // SubagentAwaitArgs | 1 agent_id | 2 timeout_ms — the same shape as
+  // TaskOutput {task_id, block, timeout}, not an approximation.
+  const translated = translateBuiltinExec(
+    { case: "subagentAwaitArgs", field: 37, args: { fields: { 1: "agent_123", 2: 45000 } } },
+    HOST_NAMES, HOST_TOOLS,
+  );
+  assert.equal(translated.toolName, "TaskOutput");
+  assert.deepEqual(JSON.parse(translated.arguments), { task_id: "agent_123", block: true, timeout: 45000 });
+});
+
+test("mcp resource execs are refused in their own typed error arms", () => {
+  // ListMcpResourcesExecResult|2 error and ReadMcpResourceExecResult|2 error
+  // carry {error=1: string} — not McpResult's shape.
+  const list = rejectionFor({ case: "listMcpResourcesExecArgs", field: 17, args: {} }, "no resources");
+  assert.equal(list.field, 17);
+  const listReader = new Reader(list.payload);
+  assert.equal(listReader.tag().field, 2, "error arm");
+  const inner = new Reader(listReader.bytes());
+  const t = inner.tag();
+  assert.equal(t.field, 1);
+  assert.equal(inner.string(), "no resources");
+
+  const read = rejectionFor({ case: "readMcpResourceExecArgs", field: 18, args: {} }, "no resources");
+  assert.equal(read.field, 18);
 });
 
 // --- tool-call id sanitization: the newline that stalled ZCode --------------
@@ -1060,4 +1151,86 @@ test("cursor exec ids are sanitized to a safe OpenAI tool_call id", () => {
 	assert.ok(!/[\x00-\x1f]/.test(sanitized), "no control characters may remain");
 	assert.ok(sanitized.length > 0 && sanitized.length <= 64);
 	assert.match(sanitized, /^[A-Za-z0-9_-]+$/, "only safe id characters");
+});
+
+// --- the coverage invariant: every decoder case is filed exactly somewhere ---
+
+import { EXEC_CASES, PASSTHROUGH_EXEC_CASES } from "../lib/cursor-client.mjs";
+
+test("the exec case table matches the decoder for every variant it names", () => {
+  // A case added to the decoder but not to EXEC_CASES (or vice versa) would
+  // make the coverage invariant below a lie. Walk the table and decode a real
+  // frame per entry.
+  for (const [name, field] of Object.entries(EXEC_CASES)) {
+    const exec = decodeExecServerMessage(execFrame({ fields: [[field, new Writer().finish()]] }));
+    assert.equal(exec.case, name, `field ${field} decodes as ${name}`);
+  }
+});
+
+test("every exec case is translated, passed through, or explicitly refused", () => {
+  // The whole contract in one invariant: supported ∪ passthrough ∪ refused =
+  // every case the decoder names. A new Cursor variant lands in refused-by-
+  // default (generic typed reply), which is safe — but a case that is neither
+  // translatable nor refusable would be a silent drop, and this test catches
+  // the bookkeeping drifting from the decoder.
+  const supported = new Set(Object.keys(translationMap().execCases));
+  for (const name of Object.keys(EXEC_CASES)) {
+    assert.ok(
+      supported.has(name) || PASSTHROUGH_EXEC_CASES.has(name) || rejectionFor({ case: name, field: EXEC_CASES[name], args: {} }, "x") !== undefined,
+      `${name} must be translatable, passthrough, or have a refusal reply`,
+    );
+  }
+  // And nothing translatable is also passthrough.
+  for (const name of supported) assert.ok(!PASSTHROUGH_EXEC_CASES.has(name), `${name} cannot be both translated and passthrough`);
+  // The claimed counts agree with the tables.
+  assert.ok(Object.keys(EXEC_CASES).length >= 40, "the complete bundle enum is represented");
+});
+
+test("the repeat budget is scoped per conversation, not per process", async () => {
+  // The poisoning bug: signatures lived for the shim's lifetime, so a later
+  // task's FIRST call to a file a previous conversation had saturated hit the
+  // cap instantly — a 502 on round one for every model after the first.
+  const { conversationKeyOf } = await import("../lib/shim.mjs");
+  const round = (extra) => [
+    { role: "system", content: "You are a coding agent." },
+    { role: "user", content: "Audit the project files." },
+    { role: "assistant", content: null, tool_calls: [{ id: "c1", function: { name: "Read", arguments: '{"file_path":"/a"}' } }] },
+    ...extra,
+  ];
+  // Same conversation growing: key must be invariant.
+  const k1 = conversationKeyOf(round([]));
+  const k2 = conversationKeyOf(round([
+    { role: "tool", tool_call_id: "c1", content: "data" },
+    { role: "assistant", content: null, tool_calls: [{ id: "c2", function: { name: "Read", arguments: '{"file_path":"/a"}' } }] },
+  ]));
+  assert.equal(k1, k2, "rounds of one conversation share a key");
+  // Different task (different first user message): independent budget.
+  const k3 = conversationKeyOf([
+    { role: "system", content: "You are a coding agent." },
+    { role: "user", content: "Refactor everything now." },
+  ]);
+  assert.notEqual(k1, k3, "a new conversation starts a fresh budget");
+  // Array-part content flattens the same as string content.
+  const k4 = conversationKeyOf([
+    { role: "system", content: [{ type: "text", text: "You are a coding agent." }] },
+    { role: "user", content: [{ type: "text", text: "Audit the project files." }] },
+  ]);
+  assert.equal(k1, k4, "content shape does not change the key");
+});
+
+test("loop protection breaks identical calls with a legible advisory", async () => {
+  // The blind-loop guarantee: the same tool call with the same arguments,
+  // delivered past the cap, must not be delivered again — the turn completes
+  // as text that names the call, the count, and a way forward.
+  const { CursorShim, repeatAdvisory } = await import("../lib/shim.mjs");
+  assert.ok(CursorShim.MAX_IDENTICAL_CALLS >= 3, "at least three deliveries before breaking");
+  const advisory = repeatAdvisory(4, "Read", '{"file_path":"/a"}');
+  assert.ok(advisory.includes("Read"), "the advisory names the call");
+  assert.ok(advisory.includes("4 times"), "the advisory states the count");
+  assert.ok(advisory.includes("history"), "the advisory points at the existing result");
+  assert.ok(!advisory.includes("unavailable"), "it is guidance, not a refusal that would loop again");
+  const shim = new CursorShim({ apiKey: "k" });
+  assert.deepEqual(shim.metrics().repeated, {}, "repeated starts empty, by exec case");
+  assert.deepEqual(shim.metrics().refused, {}, "refused starts empty, by exec case");
+  await shim.close();
 });
