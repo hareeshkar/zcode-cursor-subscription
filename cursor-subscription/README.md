@@ -42,6 +42,37 @@ agent only falls back to it when no local session is found.
 ZCode speaks `openai-chat-completions` to providers. Cursor's agent protocol is protobuf over
 bidirectional HTTP/2. A small local shim translates between the two and binds loopback only.
 
+### Tool calling — one contract, every repository
+
+Cursor's models natively call their own file/shell tools (`readArgs`, `grepArgs`, `shellArgs`, …).
+The shim translates each one into the matching ZCode tool **with the host's parameter names**, so
+nothing depends on the repository underneath:
+
+| Capability | Cursor native | → ZCode tool | Key argument renames |
+|---|---|---|---|
+| Read a file | `readArgs` | `Read` | `path` → `file_path` (+ `offset`/`limit`) |
+| Write a file | `writeArgs` | `Write` | `path` → `file_path`, `file_text` → `content` |
+| Search | `grepArgs` | `Grep` | `case_insensitive` → `-i`, flags match |
+| List | `lsArgs` | `Glob` | `pattern: "*"` synthesized |
+| Run a command | `shellArgs` / `shellStreamArgs` | `Bash` | `command` → `command` |
+| Fetch a URL | `fetchArgs` | `WebFetch` | `prompt` synthesized (host-required) |
+| Subagent | `subagentArgs` | `Agent` | `description` synthesized, `model_id` dropped |
+| Edit | `piEditArgs` (single edit) | `Edit` | `old_text` → `old_string`, `new_text` → `new_string` |
+| Diff | `gitDiffRequestArgs` | `Bash` | synthesized, shell-quoted `git diff` |
+
+Every ZCode tool is *also* registered with Cursor as a first-class tool, so models can call them
+directly by the host's own schemas. Two guarantees hold on the translation path: arguments always
+match the host's declared schema (a wrong parameter name is not an error you can see — it is a call
+that fails validation on every retry), and a call that cannot satisfy the host's required fields is
+refused with a legible typed reply instead of emitted and doomed. Execs with no host counterpart
+are refused the same way — never left unanswered, which would hang the run.
+
+The full table — every exec variant Cursor's bundle defines, including its second "pi" tool family,
+what is translated, passed through, or refused and with which typed reply — lives in
+[`docs/TRANSLATION-MAP.md`](../docs/TRANSLATION-MAP.md). The machine-readable contract is served
+live by the running shim at `GET /internal/translation`, and `/internal/status` counts translations
+per exec case, so you can always see which path a turn actually took.
+
 ### Context and cost
 
 ZCode owns the conversation and rewrites it between turns — auto-compaction, microcompaction, edits and
