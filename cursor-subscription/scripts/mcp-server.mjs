@@ -12,6 +12,9 @@
  */
 
 import { createInterface } from "node:readline";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
 import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -27,6 +30,7 @@ import { compareEndpoints, inspectProviderConfig } from "../lib/diagnose.mjs";
 import { DEFAULT_SHIM_PORT, FALLBACK_MODELS, SHIM_HOST, SHIM_PATHS, dataDir } from "../lib/config.mjs";
 
 const PROTOCOL_VERSION = "2025-06-18";
+const SHIM_VERSION = require("../package.json").version;
 
 /**
  * Shown before sign-in.
@@ -597,14 +601,44 @@ const TOOLS = [
 			if (status.expiresAt) {
 				lines.push(`Token valid until: ${new Date(status.expiresAt).toISOString()}`);
 			}
+			// The serving shim owns the counters. When this process is an adopter,
+			// its own numbers are all zero and reporting them would hide the real
+			// activity — query the serving instance instead.
+			let source = metrics;
+			let role = outcome.adopted ? "ADOPTED (querying the serving shim)" : "OWNER";
+			if (outcome.adopted) {
+				try {
+					const res = await fetch(`http://${shim.host}:${shim.port}/internal/status`, {
+						headers: { authorization: `Bearer ${shim.apiKey}` },
+						signal: AbortSignal.timeout(5_000),
+					});
+					if (res.ok) {
+						const remote = await res.json();
+						source = { ...remote, approximations: remote.approximations ?? metrics.approximations };
+						role = `ADOPTED — real counters from pid ${remote.pid}`;
+						if (remote.version && remote.version !== SHIM_VERSION) {
+							lines.push(
+								`  warn  the serving shim is version ${remote.version}; this session runs ` +
+									`${SHIM_VERSION}. Restart ZCode to align them.`,
+							);
+						}
+					}
+				} catch {
+					// The serving shim stopped between the health check and now; fall
+					// back to local numbers rather than failing the status call.
+					role = "ADOPTED (serving shim did not answer its status endpoint)";
+				}
+			}
+			const counters = source;
 			lines.push(
-				`Shim: ${metrics.turns} turns, ${metrics.resumed} resumed, ${metrics.replayed} ` +
-					`replayed (resume rate ${metrics.resumeRate}), ` +
-					`${metrics.conversations} resumable conversations.`,
+				`Shim role: ${role}`,
+				`Shim: ${counters.turns} turns, ${counters.resumed} resumed, ${counters.replayed} ` +
+					`replayed (resume rate ${counters.resumeRate}), ` +
+					`${counters.conversations} resumable conversations.`,
 			);
 			lines.push(
-				`Tools: ${metrics.toolRequests} requested by Cursor, ${metrics.toolCalls} delivered to ` +
-					`the host, ${metrics.droppedToolCalls} dropped.`,
+				`Tools: ${counters.toolRequests} requested by Cursor, ${counters.toolCalls} delivered to ` +
+					`the host, ${counters.droppedToolCalls} dropped.`,
 			);
 			if (!outcome.ok) {
 				lines.push(`Not serving: ${outcome.reason}.`);

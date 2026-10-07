@@ -21,6 +21,11 @@
 
 import { createServer } from "node:http";
 import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+/** The plugin's own version, read from package.json — one source of truth. */
+const SHIM_VERSION = require("../package.json").version;
 
 import {
 	ADOPTION_CHECK_INTERVAL_MS,
@@ -267,6 +272,8 @@ export class CursorShim {
 	// and what we last did with it. Frames still arriving means the model is
 	// working; silence right after an unanswered exec means it is waiting on us.
 	#liveness = { frames: 0, lastFrameAt: 0, lastAction: "none" };
+	/** When this process started serving — distinguishes a fresh shim from a stale one. */
+	#startedAt = new Date().toISOString();
 	/** Inbound arms we do not decode, by field number. Silence here is not health. */
 	#unknownFrames = new Map();
 	/** Server frames that got neither a reply nor a log. */
@@ -349,6 +356,9 @@ export class CursorShim {
 			// diagnosed while a third of the wire is invisible.
 			unknownFrames: Object.fromEntries(this.#unknownFrames),
 			unanswered: Object.fromEntries(this.#unanswered),
+			pid: process.pid,
+			version: SHIM_VERSION,
+			startedAt: this.#startedAt,
 			frames: this.#liveness.frames,
 			lastFrameAt: this.#liveness.lastFrameAt,
 			lastAction: this.#liveness.lastAction,
@@ -590,6 +600,20 @@ export class CursorShim {
 		if (url.pathname === "/v1/models" && request.method === "GET") return this.#models(response);
 		if (url.pathname === "/v1/chat/completions" && request.method === "POST") {
 			return this.#chatCompletions(request, response);
+		}
+		if (url.pathname === "/internal/status" && request.method === "GET") {
+			// The serving shim is the single source of truth for the counters.
+			// Adopter processes query this instead of reporting their own (always
+			// zero) local state, and the pid lets everyone see WHO actually serves.
+			response.writeHead(200, { "content-type": "application/json" });
+			response.end(JSON.stringify({
+				pid: process.pid,
+				serving: true,
+				version: SHIM_VERSION,
+				startedAt: this.#startedAt,
+				...this.metrics(),
+			}));
+			return;
 		}
 		if (url.pathname === "/health" && request.method === "GET") {
 			response.writeHead(200, { "content-type": "application/json" });
