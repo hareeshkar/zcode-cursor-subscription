@@ -214,6 +214,95 @@ RequestContext|2 rules #0*|4 env #1|6 repository_info #2*|7 tools #3*|...
 
 53 fields, of which we populate one. `tools = 7` is confirmed.
 
+### The complete exec enum (audited against cursor-agent 2026.10.01)
+
+Mined from `~/.local/share/cursor-agent/versions/2026.10.01-e373342/index.js`,
+not from observation alone. Field 36 was long misread here as "provider
+routing" — it is `mcp_state_exec_args`, an MCP-server-state poll whose
+`server_identifiers` named our provider, which is exactly why the payload
+looked like routing.
+
+```
+ExecServerMessage (oneof)      reply slot on ExecClientMessage
+  2  shell_args                2  shell_result        (ShellResult: rejected=4)
+  3  write_args                3  write_result        (rejected=6)
+  4  delete_args               4  delete_result       (rejected=6)
+  5  grep_args                 5  grep_result         (error=2)
+  7  read_args                 7  read_result         (rejected=3 {path,reason})
+  8  ls_args                   8  ls_result           (rejected=3)
+  9  diagnostics_args          9  diagnostics_result
+ 10  request_context_args     10  request_context_result
+ 11  mcp_args                 11  mcp_result          (success|error|rejected|...)
+ 14  shell_stream_args        14  shell_stream        (event stream; rejected=5)
+ 16  background_shell_spawn   16  ..._result          (rejected=3)
+ 17  list_mcp_resources       17  ..._result
+ 18  read_mcp_resource        18  ..._result          (not_found=4)
+ 19  span_context (scalar on the message, not a oneof arm)
+ 20  fetch_args               20  fetch_result        (error=2, rejected=3)
+ 21  record_screen_args       21  ...
+ 22  computer_use_args        22  ...
+ 23  write_shell_stdin_args   23  ..._result          (error=2)
+ 27  execute_hook_args        27  execute_hook_result
+ 28  subagent_args            28  subagent_result     → translated to Agent
+ 29  redacted_read_args       29  redacted_read_result (shares ReadArgs)
+ 30  force_background_shell   30  ..._result {status, shell_result?}
+ 31  force_background_subagent 31 ..._result {status}
+ 36  mcp_state_exec_args      36  mcp_state_exec_result (success|error|rejected)
+ 37  subagent_await_args      37  ..._result
+ 38  smart_mode_classifier    38  ..._result
+ 40  canvas_diagnostics_args  40  ..._result
+ 41  shell_allowlist_precheck 41  ..._result {allowlisted=1: bool}  ← flat bool
+ 42  mcp_allowlist_precheck   42  ..._result {allowlisted=1: bool}
+ 43  web_fetch_allowlist_precheck 43 ..._result {allowlisted=1: bool}
+ 44  git_diff_request         44  git_diff_response   → translated to Bash
+ 45  pi_read_args             45  pi_*_result         → Read
+ 46  pi_bash_args             46                      → Bash
+ 47  pi_edit_args             47                      → Edit (single edit)
+ 48  pi_write_args            48                      → Write
+ 49  pi_grep_args             49                      → Grep
+ 50  pi_find_args             50                      → Glob
+ 51  pi_ls_args               51                      → Glob
+ 52  mini_swe_agent_bash_args 52  (empty args; shares ShellResult)
+ 53  conversation_search_args 53  ..._result
+ 54  agent_store_conflict_args 54 ..._result
+ 55  accept_hook_additional_contexts (scalar, not a oneof arm)
+ 56  adopt_args               56  adopt_result
+ 57 machine_id (top-level scalar)
+```
+
+Unassigned in 1–56: 1, 6, 12, 13, 15, 24–26, 32–35, 39.
+
+**There is no native old/new edit exec in the main family.** The only
+string-replacement edit is `pi_edit` (field 47):
+`PiEditExecArgs|1 path|2 edits*` with `PiEditReplacement|1 old_text|2 new_text`.
+Semantic search exists only as MCP tool schemas, not as an exec.
+
+Arg schemas that the translator consumes:
+
+```
+ReadArgs      |1 path 9|2 tool_call_id 9|4 offset 5?|5 limit 13?|6 encoding_hint 9?
+GrepArgs      |1 pattern|2 path|3 glob|4 output_mode 9 (string: content|
+               files_with_matches|count)|8 case_insensitive 8|10 head_limit 5|
+               11 multiline 8|16 offset 5|14 tool_call_id|15 sandbox_policy
+WriteArgs     |1 path 9|2 file_text 9|3 tool_call_id|4 return_file_content_after_write 8
+FetchArgs     |1 url 9|2 tool_call_id 9
+LsArgs        |1 path 9|2 ignore 9*|3 tool_call_id|5 timeout_ms 13?
+ShellArgs     |1 command|2 working_directory|3 timeout 5|4 tool_call_id|… (24 fields)
+SubagentArgs  |1 tool_call_id|2 subagent_type|3 model_id|4 prompt|5 readonly|
+               6 resume_agent_id|7 run_in_background 8?|… (21 fields)
+PiReadArgs    |1 path|2 offset 5?|3 limit 5?          PiBashArgs |1 command|2 timeout 1?
+PiWriteArgs   |1 path|2 content                      PiGrepArgs |1 pattern|2 path?|3 glob?|
+                                                        4 ignore_case 8?|5 literal 8?|6 context 5?|7 limit 5?
+PiFindArgs    |1 pattern|2 path?|3 limit 5?          PiLsArgs   |1 path?|2 limit 5?
+GetDiffRequest|1 cwd 9|2 ref 9|3 base_ref 9|4 merge_base 8|5 target_paths 9*|
+               6 unified_context_lines 5?|8 output_format #0?|… (16 fields)
+```
+
+The live translation contract — which exec cases this build translates, into
+which host tools, with which argument renames — is served by the running shim
+at `/internal/translation`, so a dig reads what the code does, not what this
+page said at some point.
+
 ---
 
 ## Image support: settled by Cursor's own answer

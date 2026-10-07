@@ -54,14 +54,17 @@ function execFrame({ id = 1, execId = "", fields = [] }) {
 
 const stringField = (value) => new Writer().string(1, value).finish();
 
-test("a provider-routing exec is unknown, not a tool call", () => {
-	// Observed live: field 36 carrying the provider identifier we registered.
-	const frame = execFrame({ fields: [[36, stringField("zcode-cursor-subscription")]] });
-	const exec = decodeExecServerMessage(frame);
+test("an mcp_state exec is named, not a tool call", () => {
+  // Observed live on field 36 and then identified in cursor-agent's bundle:
+	// mcp_state_exec_args, an MCP-server-state poll carrying server identifiers
+	// (which is why the payload named our provider). It is not a tool call; the
+	// generic error reply on its own field is proven to resume the run.
+  const frame = execFrame({ fields: [[36, stringField("zcode-cursor-subscription")]] });
+  const exec = decodeExecServerMessage(frame);
 
-	assert.equal(exec.case, "unknown");
-	assert.equal(exec.field, 36, "the field number has to survive for the reply slot");
-	assert.ok(!("args" in exec), "it must not look like a decodable tool call");
+  assert.equal(exec.case, "mcpStateExecArgs");
+  assert.equal(exec.field, 36, "the field number has to survive for the reply slot");
+  assert.ok(!("toolName" in (exec.args ?? {})), "it must not look like a decodable tool call");
 });
 
 test("a real mcp_args exec is still recognised", () => {
@@ -156,10 +159,10 @@ test("a Cursor built-in exec is recognised, refused, and never a tool call", () 
 });
 
 test("an exec with no exec id still decodes rather than throwing", () => {
-	// Observed live: id=0 with no field 15 at all, because proto3 omits defaults.
-	const exec = decodeExecServerMessage(execFrame({ id: 0, fields: [[36, stringField("x")]] }));
-	assert.equal(exec.id, 0);
-	assert.equal(exec.case, "unknown");
+  // Observed live: id=0 with no field 15 at all, because proto3 omits defaults.
+  const exec = decodeExecServerMessage(execFrame({ id: 0, fields: [[57, stringField("x")]] }));
+  assert.equal(exec.id, 0);
+  assert.equal(exec.case, "unknown");
 });
 
 // --- the invariant that would have caught the original defect ---------------
@@ -671,12 +674,14 @@ import { translateBuiltinExec } from "../lib/translate.mjs";
 // failed validation — the host requires `file_path`. A fixture that does not
 // match the host is a blind instrument: it passes the tests and proves nothing.
 const HOST_TOOLS = [
-  { function: { name: "Bash", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } } },
+  { function: { name: "Bash", parameters: { type: "object", properties: { command: { type: "string" }, timeout: { type: "number" } }, required: ["command"] } } },
   { function: { name: "Read", parameters: { type: "object", properties: { file_path: { type: "string" }, offset: { type: "number" }, limit: { type: "number" } }, required: ["file_path"] } } },
-  { function: { name: "Grep", parameters: { type: "object", properties: { pattern: { type: "string" }, path: { type: "string" }, glob: { type: "string" } }, required: ["pattern"] } } },
+  { function: { name: "Grep", parameters: { type: "object", properties: { pattern: { type: "string" }, path: { type: "string" }, glob: { type: "string" }, output_mode: { type: "string", enum: ["content", "files_with_matches", "count"] }, "-i": { type: "boolean" }, head_limit: { type: "number" }, multiline: { type: "boolean" }, context: { type: "number" } }, required: ["pattern"] } } },
   { function: { name: "Write", parameters: { type: "object", properties: { file_path: { type: "string" }, content: { type: "string" } }, required: ["file_path", "content"] } } },
+  { function: { name: "Edit", parameters: { type: "object", properties: { file_path: { type: "string" }, old_string: { type: "string" }, new_string: { type: "string" }, replace_all: { type: "boolean" } }, required: ["file_path", "old_string", "new_string"] } } },
   { function: { name: "WebFetch", parameters: { type: "object", properties: { url: { type: "string" }, prompt: { type: "string" } }, required: ["url", "prompt"] } } },
   { function: { name: "Glob", parameters: { type: "object", properties: { pattern: { type: "string" }, path: { type: "string" } }, required: ["pattern"] } } },
+  { function: { name: "Agent", parameters: { type: "object", properties: { description: { type: "string" }, prompt: { type: "string" }, subagent_type: { type: "string" }, run_in_background: { type: "boolean" } }, required: ["description", "prompt"] } } },
 ];
 const HOST_NAMES = new Set(HOST_TOOLS.map((t) => t.function.name));
 
@@ -824,6 +829,223 @@ test("the translated call id is sanitized even when the exec id is absent", () =
     HOST_NAMES, HOST_TOOLS,
   );
   assert.match(translated.callId, /^[A-Za-z0-9_-]+$/, "only id-safe characters");
+});
+
+// --- the audited contract: every exec family from cursor-agent's own bundle ----
+
+import { translationMap } from "../lib/translate.mjs";
+import { rejectionFor } from "../lib/cursor-client.mjs";
+
+test("grep's full flag set survives translation with the host's spellings", () => {
+  // GrepArgs | 1 pattern | 2 path | 3 glob | 4 output_mode (string) |
+  // 8 case_insensitive (bool) | 10 head_limit | 11 multiline — all verified
+  // against cursor-agent's bundle, including output_mode's exact string values.
+  const exec = decodeExecServerMessage(
+    execFrame({
+      fields: [[5, new Writer()
+        .string(1, "TODO")
+        .string(2, "src/")
+        .string(3, "*.cs")
+        .string(4, "content")
+        .varint(8, 1)
+        .varint(10, 40)
+        .varint(11, 1)
+        .finish()]],
+    }),
+  );
+  assert.equal(exec.case, "grepArgs");
+  const translated = translateBuiltinExec(exec, HOST_NAMES, HOST_TOOLS);
+  const args = JSON.parse(translated.arguments);
+  assert.equal(args.pattern, "TODO");
+  assert.equal(args.path, "src/");
+  assert.equal(args.glob, "*.cs");
+  assert.equal(args.output_mode, "content");
+  assert.equal(args["-i"], true, "Cursor's case_insensitive becomes ZCode's -i");
+  assert.equal(args.head_limit, 40);
+  assert.equal(args.multiline, true);
+});
+
+test("an output_mode value the host does not enumerate is dropped, not sent", () => {
+  const translated = translateBuiltinExec(
+    { case: "grepArgs", field: 5, args: { fields: { 1: "x", 4: "summary" } } },
+    HOST_NAMES, HOST_TOOLS,
+  );
+  const args = JSON.parse(translated.arguments);
+  assert.equal("output_mode" in args, false);
+  assert.equal(args.pattern, "x", "the call itself still goes through");
+});
+
+test("redacted_read shares the read translation", () => {
+  // Field 29, same ReadArgs schema: the host is the executor either way.
+  const translated = translateBuiltinExec(
+    { case: "redactedReadArgs", field: 29, execId: "e\nr", args: { fields: { 1: "/srv/app.ini" } } },
+    HOST_NAMES, HOST_TOOLS,
+  );
+  assert.equal(translated.toolName, "Read");
+  assert.equal(JSON.parse(translated.arguments).file_path, "/srv/app.ini");
+  assert.ok(!translated.callId.includes("\n"));
+});
+
+test("Cursor's native subagent dispatch becomes the host's Agent tool", () => {
+  // SubagentArgs | 1 tool_call_id | 2 subagent_type | 4 prompt | 7 run_in_background.
+  // The host requires a description Cursor never sends, so one is synthesized;
+  // model_id has no host parameter and is dropped.
+  const translated = translateBuiltinExec(
+    { case: "subagentArgs", field: 28, execId: "sa", args: { fields: { 2: "Explore", 3: "gpt-9", 4: "Find the config.", 7: 1 } } },
+    HOST_NAMES, HOST_TOOLS,
+  );
+  assert.equal(translated.toolName, "Agent");
+  const args = JSON.parse(translated.arguments);
+  assert.equal(args.prompt, "Find the config.");
+  assert.equal(args.subagent_type, "Explore");
+  assert.equal(args.run_in_background, true);
+  assert.equal(typeof args.description, "string");
+  assert.ok(args.description.length > 0, "the host's required description is synthesized");
+  assert.ok(!("model_id" in args));
+});
+
+test("every pi-family exec translates onto the same host tools", () => {
+  // The pi family (fields 45-51) re-numbers the args; each maps onto the
+  // corresponding host tool with its own alias table.
+  const piRead = translateBuiltinExec(
+    { case: "piReadArgs", field: 45, args: { fields: { 1: "/a.log", 2: 10, 3: 5 } } },
+    HOST_NAMES, HOST_TOOLS,
+  );
+  assert.equal(piRead.toolName, "Read");
+  assert.deepEqual(JSON.parse(piRead.arguments), { file_path: "/a.log", offset: 10, limit: 5 });
+
+  const piBash = translateBuiltinExec(
+    { case: "piBashArgs", field: 46, args: { fields: { 1: "git status", 2: 30000 } } },
+    HOST_NAMES, HOST_TOOLS,
+  );
+  assert.equal(piBash.toolName, "Bash");
+  assert.deepEqual(JSON.parse(piBash.arguments), { command: "git status", timeout: 30000 });
+
+  const piWrite = translateBuiltinExec(
+    { case: "piWriteArgs", field: 48, args: { fields: { 1: "/tmp/a.txt", 2: "hello" } } },
+    HOST_NAMES, HOST_TOOLS,
+  );
+  assert.deepEqual(JSON.parse(piWrite.arguments), { file_path: "/tmp/a.txt", content: "hello" });
+
+  const piGrep = translateBuiltinExec(
+    { case: "piGrepArgs", field: 49, args: { fields: { 1: "TODO", 2: "src/", 4: 1, 6: 3, 7: 20 } } },
+    HOST_NAMES, HOST_TOOLS,
+  );
+  const g = JSON.parse(piGrep.arguments);
+  assert.equal(g["-i"], true);
+  assert.equal(g.context, 3);
+  assert.equal(g.head_limit, 20);
+
+  const piFind = translateBuiltinExec(
+    { case: "piFindArgs", field: 50, args: { fields: { 1: "*.test.mjs", 2: "test/" } } },
+    HOST_NAMES, HOST_TOOLS,
+  );
+  assert.equal(piFind.toolName, "Glob");
+  assert.deepEqual(JSON.parse(piFind.arguments), { pattern: "*.test.mjs", path: "test/" });
+
+  const piLs = translateBuiltinExec(
+    { case: "piLsArgs", field: 51, args: { fields: { 1: "/srv" } } },
+    HOST_NAMES, HOST_TOOLS,
+  );
+  assert.deepEqual(JSON.parse(piLs.arguments), { pattern: "*", path: "/srv" });
+});
+
+test("a single pi_edit replacement becomes the host's Edit", () => {
+  // PiEditExecArgs | 1 path | 2 edits* {1 old_text, 2 new_text}. ZCode's Edit is
+  // one replacement per call.
+  const edit = new Writer().string(1, "old line").string(2, "new line").finish();
+  const exec = decodeExecServerMessage(
+    execFrame({ fields: [[47, new Writer().string(1, "/a.txt").bytes(2, edit).finish()]] }),
+  );
+  assert.equal(exec.case, "piEditArgs");
+  assert.equal(exec.args.edits.length, 1);
+  const translated = translateBuiltinExec(exec, HOST_NAMES, HOST_TOOLS);
+  assert.equal(translated.toolName, "Edit");
+  assert.deepEqual(JSON.parse(translated.arguments), {
+    file_path: "/a.txt",
+    old_string: "old line",
+    new_string: "new line",
+  });
+});
+
+test("a multi-edit pi_edit declines rather than losing all but the first", () => {
+  const e1 = new Writer().string(1, "a").string(2, "b").finish();
+  const e2 = new Writer().string(1, "c").string(2, "d").finish();
+  const exec = decodeExecServerMessage(
+    execFrame({ fields: [[47, new Writer().string(1, "/a.txt").bytes(2, e1).bytes(2, e2).finish()]] }),
+  );
+  assert.equal(exec.args.edits.length, 2);
+  const translated = translateBuiltinExec(exec, HOST_NAMES, HOST_TOOLS);
+  assert.equal(translated, null, "falls back to the typed refusal instead of a silent partial edit");
+});
+
+test("a git diff request synthesizes a quoted git diff command", () => {
+  // GetDiffRequest | 1 cwd | 2 ref | 3 base_ref | 4 merge_base | 5 target_paths* |
+  // 6 unified_context_lines → the Bash command the model would have run itself.
+  const exec = decodeExecServerMessage(
+    execFrame({
+      fields: [[44, new Writer()
+        .string(1, "/repo")
+        .string(2, "feature")
+        .string(3, "main")
+        .varint(4, 1)
+        .string(5, "src/a.js")
+        .string(5, "src/b name.js")
+        .varint(6, 3)
+        .finish()]],
+    }),
+  );
+  assert.equal(exec.case, "gitDiffRequestArgs");
+  assert.deepEqual(exec.args.paths, ["src/a.js", "src/b name.js"], "repeated paths are all collected");
+  const translated = translateBuiltinExec(exec, HOST_NAMES, HOST_TOOLS);
+  assert.equal(translated.toolName, "Bash");
+  const args = JSON.parse(translated.arguments);
+  assert.ok(args.command.startsWith("git -C '/repo' diff"));
+  assert.ok(args.command.includes("'main...feature'"), "merge_base picks the three-dot form");
+  assert.ok(args.command.includes("-U3"));
+  assert.ok(args.command.includes("-- 'src/a.js' 'src/b name.js'"), "paths are shell-quoted");
+});
+
+test("allowlist prechecks are answered with the flat bool they expect", () => {
+  // ShellAllowlistPrecheckResult | 1 allowlisted 8 — a flat bool, not an error
+  // oneof. The generic error shape cannot answer it; false is honest, because
+  // the host's permission system is the allowlist.
+  for (const [field, name] of [[41, "shellAllowlistPrecheckArgs"], [42, "mcpAllowlistPrecheckArgs"], [43, "webFetchAllowlistPrecheckArgs"]]) {
+    const rejection = rejectionFor({ case: name, field, args: {} }, "unused");
+    assert.equal(rejection.field, field);
+    const reader = new Reader(rejection.payload);
+    const tag = reader.tag();
+    assert.equal(tag.field, 1, "allowlisted lives at field 1");
+    assert.equal(reader.varint(), 0, "allowlisted = false");
+  }
+});
+
+test("every newly named exec case keeps its field so its refusal is addressable", () => {
+  const cases = [
+    [27, "executeHookArgs"], [28, "subagentArgs"], [29, "redactedReadArgs"],
+    [30, "forceBackgroundShellArgs"], [31, "forceBackgroundSubagentArgs"],
+    [36, "mcpStateExecArgs"], [37, "subagentAwaitArgs"], [38, "smartModeClassifierArgs"],
+    [40, "canvasDiagnosticsArgs"], [44, "gitDiffRequestArgs"], [45, "piReadArgs"],
+    [46, "piBashArgs"], [47, "piEditArgs"], [48, "piWriteArgs"], [49, "piGrepArgs"],
+    [50, "piFindArgs"], [51, "piLsArgs"], [52, "miniSweAgentBashArgs"],
+    [53, "conversationSearchArgs"], [54, "agentStoreConflictArgs"], [56, "adoptArgs"],
+  ];
+  for (const [field, name] of cases) {
+    const exec = decodeExecServerMessage(execFrame({ fields: [[field, new Writer().finish()]] }));
+    assert.equal(exec.case, name, `field ${field} decodes as ${name}`);
+    assert.equal(exec.field, field, `${name} keeps field ${field} or its refusal cannot be addressed`);
+  }
+});
+
+test("the translation map is inspectable: every case names its tools and renames", () => {
+  const map = translationMap();
+  assert.equal(map.execCases.readArgs.tools[0], "Read");
+  assert.equal(map.execCases.readArgs.args.file_path.to, "file_path");
+  assert.deepEqual(map.execCases.readArgs.args.file_path.fallbacks, ["path"]);
+  assert.equal(map.execCases.fetchArgs.args.prompt.to, "prompt", "synthesized fields appear too");
+  for (const required of ["grepArgs", "subagentArgs", "piEditArgs", "gitDiffRequestArgs"]) {
+    assert.ok(map.execCases[required], `${required} is in the live contract`);
+  }
 });
 
 // --- tool-call id sanitization: the newline that stalled ZCode --------------

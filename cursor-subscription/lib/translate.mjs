@@ -34,14 +34,30 @@ function stringOf(value) {
 	return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-/**
- * A finite number, accepting the varint the decoder produced or a numeric
+/** A finite number, accepting the varint the decoder produced or a numeric
  * string — Cursor has sent both shapes for line numbers.
  */
 function numberOf(value) {
 	if (typeof value === "number" && Number.isFinite(value)) return value;
 	if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) return Number(value);
 	return undefined;
+}
+
+/** A boolean, accepting the varint (0/1) the decoder produced or "true"/"false". */
+function booleanOf(value) {
+	if (value === 1 || value === true || value === "true") return true;
+	if (value === 0 || value === false || value === "false") return false;
+	return undefined;
+}
+
+/** An enum member, or undefined so a value the host does not know is not sent. */
+function enumOf(value, values) {
+	return typeof value === "string" && values.includes(value) ? value : undefined;
+}
+
+/** Shell-quote a value for a synthesized Bash command (git diff, ls). */
+function shq(value) {
+	return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
 /** Sanitize Cursor's execId into a safe OpenAI tool_call id. */
@@ -54,6 +70,20 @@ function sanitizedCallId(execId) {
 	);
 }
 
+/** The read capability, shared by readArgs and its redacted variant (field 29). */
+const READ_CAPABILITY = {
+	// ReadArgs | 1 path | 2 tool_call_id | 4 offset | 5 limit | 6 encoding_hint
+	// — offset/limit are 1-based lines on both sides, so they pass through
+	// unchanged. The redacted variant shares the ReadArgs schema.
+	names: ["Read"],
+	build: (a) => ({
+		file_path: stringOf(a.fields?.[1] ?? a.primary),
+		offset: numberOf(a.fields?.[4]),
+		limit: numberOf(a.fields?.[5]),
+	}),
+	aliases: { file_path: ["file_path", "path"], offset: ["offset"], limit: ["limit"] },
+};
+
 /**
  * Cursor exec case → host tool candidates.
  *
@@ -63,25 +93,33 @@ function sanitizedCallId(execId) {
  */
 const CAPABILITY = {
 	// ReadArgs | 1 path | 4 offset | 5 limit — offset/limit are 1-based lines
-	// on both sides, so they pass through unchanged.
-	readArgs: {
-		names: ["Read"],
-		build: (a) => ({
-			file_path: stringOf(a.fields?.[1] ?? a.primary),
-			offset: numberOf(a.fields?.[4]),
-			limit: numberOf(a.fields?.[5]),
-		}),
-		aliases: { file_path: ["file_path", "path"], offset: ["offset"], limit: ["limit"] },
-	},
-	// GrepArgs | 1 pattern | 2 path | 3 include glob.
+	// on both sides, so they pass through unchanged. redactedReadArgs (field 29)
+	// shares the ReadArgs schema: the host is the executor either way.
+	readArgs: READ_CAPABILITY,
+	redactedReadArgs: READ_CAPABILITY,
+	// GrepArgs | 1 pattern | 2 path | 3 glob | 4 output_mode | 8
+	// case_insensitive | 10 head_limit | 11 multiline | 16 offset. ZCode's Grep
+	// spells the case flag `-i`; everything else shares its name.
 	grepArgs: {
 		names: ["Grep"],
 		build: (a) => ({
 			pattern: stringOf(a.fields?.[1] ?? a.primary),
 			path: stringOf(a.fields?.[2] ?? a.second),
 			glob: stringOf(a.fields?.[3] ?? a.third),
+			output_mode: enumOf(a.fields?.[4], ["content", "files_with_matches", "count"]),
+			"-i": booleanOf(a.fields?.[8]),
+			head_limit: numberOf(a.fields?.[10]),
+			multiline: booleanOf(a.fields?.[11]),
 		}),
-		aliases: { pattern: ["pattern", "query"], path: ["path"], glob: ["glob", "include"] },
+		aliases: {
+			pattern: ["pattern", "query"],
+			path: ["path"],
+			glob: ["glob", "include"],
+			output_mode: ["output_mode"],
+			"-i": ["-i", "case_insensitive"],
+			head_limit: ["head_limit"],
+			multiline: ["multiline"],
+		},
 	},
 	// LsArgs | 1 path. Glob is the listing tool; it needs a pattern Cursor never
 	// sends, so a listing pattern is synthesized rather than the call failing.
@@ -127,6 +165,134 @@ const CAPABILITY = {
 			prompt: "Fetch this URL and return its content.",
 		}),
 		aliases: { url: ["url"], prompt: ["prompt", "question", "instructions"] },
+	},
+	// SubagentArgs | 1 tool_call_id | 2 subagent_type | 3 model_id | 4 prompt |
+	// 7 run_in_background. Cursor dispatches its own subagents natively; ZCode's
+	// Agent tool is the same capability. `description` is required by the host
+	// and sent by no one, so it is synthesized. model_id has no host parameter
+	// and is dropped — the subagent runs on the host's configured model.
+	subagentArgs: {
+		names: ["Agent", "Task"],
+		build: (a) => ({
+			description: "Cursor subagent task",
+			prompt: stringOf(a.fields?.[4]),
+			subagent_type: stringOf(a.fields?.[2]),
+			run_in_background: booleanOf(a.fields?.[7]),
+		}),
+		aliases: {
+			description: ["description"],
+			prompt: ["prompt"],
+			subagent_type: ["subagent_type", "agent_type"],
+			run_in_background: ["run_in_background"],
+		},
+	},
+	// --- Cursor's "pi" tool family (fields 45-51): a second, simpler set of
+	// tool execs with its own arg numbering. Every one maps onto the same host
+	// tools as the main family.
+	// PiReadExecArgs | 1 path | 2 offset | 3 limit.
+	piReadArgs: {
+		names: ["Read"],
+		build: (a) => ({
+			file_path: stringOf(a.fields?.[1] ?? a.primary),
+			offset: numberOf(a.fields?.[2]),
+			limit: numberOf(a.fields?.[3]),
+		}),
+		aliases: { file_path: ["file_path", "path"], offset: ["offset"], limit: ["limit"] },
+	},
+	// PiBashExecArgs | 1 command | 2 timeout (ms, int64).
+	piBashArgs: {
+		names: ["Bash"],
+		build: (a) => ({
+			command: a.fields?.[1] ?? a.primary ?? "",
+			timeout: numberOf(a.fields?.[2]),
+		}),
+		aliases: { command: ["command"], timeout: ["timeout"] },
+	},
+	// PiWriteExecArgs | 1 path | 2 content.
+	piWriteArgs: {
+		names: ["Write"],
+		build: (a) => ({
+			file_path: stringOf(a.fields?.[1]),
+			content: typeof a.fields?.[2] === "string" ? a.fields[2] : "",
+		}),
+		aliases: { file_path: ["file_path", "path"], content: ["content", "file_text"] },
+	},
+	// PiGrepExecArgs | 1 pattern | 2 path | 3 glob | 4 ignore_case | 6 context |
+	// 7 limit. `literal` (5) has no host parameter — ZCode's Grep is regex-only —
+	// so it is dropped rather than approximated.
+	piGrepArgs: {
+		names: ["Grep"],
+		build: (a) => ({
+			pattern: stringOf(a.fields?.[1] ?? a.primary),
+			path: stringOf(a.fields?.[2]),
+			glob: stringOf(a.fields?.[3]),
+			"-i": booleanOf(a.fields?.[4]),
+			context: numberOf(a.fields?.[6]),
+			head_limit: numberOf(a.fields?.[7]),
+		}),
+		aliases: {
+			pattern: ["pattern", "query"],
+			path: ["path"],
+			glob: ["glob", "include"],
+			"-i": ["-i", "case_insensitive"],
+			context: ["context", "-C"],
+			head_limit: ["head_limit"],
+		},
+	},
+	// PiFindExecArgs | 1 pattern | 2 path | 3 limit.
+	piFindArgs: {
+		names: ["Glob"],
+		build: (a) => ({
+			pattern: stringOf(a.fields?.[1] ?? a.primary) ?? "*",
+			path: stringOf(a.fields?.[2]),
+		}),
+		aliases: { pattern: ["pattern"], path: ["path"] },
+	},
+	// PiLsExecArgs | 1 path | 2 limit.
+	piLsArgs: {
+		names: ["Glob", "Bash"],
+		build: (a, toolName) => {
+			if (toolName === "Glob") return { pattern: "*", path: stringOf(a.fields?.[1] ?? a.primary) };
+			return { command: `ls -la ${shq(a.fields?.[1] ?? a.primary ?? ".")}` };
+		},
+		aliases: { pattern: ["pattern"], path: ["path"], command: ["command"] },
+	},
+	// PiEditExecArgs | 1 path | 2 edits* ({old_text, new_text}). ZCode's Edit is
+	// a single replacement per call: exactly one edit translates, and any other
+	// count declines to the typed refusal so the model can re-issue per edit
+	// instead of losing all but the first.
+	piEditArgs: {
+		names: ["Edit"],
+		build: (a) => {
+			const edits = Array.isArray(a.edits) ? a.edits : [];
+			if (edits.length !== 1) return {};
+			return {
+				file_path: stringOf(a.fields?.[1]),
+				old_string: edits[0].oldText,
+				new_string: edits[0].newText,
+			};
+		},
+		aliases: { file_path: ["file_path", "path"], old_string: ["old_string", "old_text"], new_string: ["new_string", "new_text"] },
+	},
+	// GetDiffRequest | 1 cwd | 2 ref | 3 base_ref | 4 merge_base | 5 target_paths*
+	// | 6 unified_context_lines. There is no diff tool on the host, but there is
+	// Bash, and `git diff` is exactly what the model would run itself; the call
+	// still passes through the host's Bash permission system like any other.
+	gitDiffRequestArgs: {
+		names: ["Bash"],
+		build: (a) => {
+			const parts = ["git", "-C", shq(stringOf(a.fields?.[1]) ?? "."), "diff"];
+			const ref = stringOf(a.fields?.[2]);
+			const baseRef = stringOf(a.fields?.[3]);
+			if (baseRef && ref) parts.push(shq(a.fields?.[4] === 1 || a.fields?.[4] === true ? `${baseRef}...${ref}` : `${baseRef} ${ref}`));
+			else if (ref) parts.push(shq(ref));
+			const unified = numberOf(a.fields?.[6]);
+			if (unified !== undefined) parts.push(`-U${unified}`);
+			const paths = Array.isArray(a.paths) ? a.paths.filter((p) => typeof p === "string" && p.length > 0) : [];
+			if (paths.length > 0) parts.push("--", ...paths.map(shq));
+			return { command: parts.join(" ") };
+		},
+		aliases: { command: ["command"] },
 	},
 };
 
@@ -185,4 +351,27 @@ export function translateBuiltinExec(exec, toolNames, declared) {
 		};
 	}
 	return null;
+}
+
+/**
+ * The live translation contract, in inspectable form: for every Cursor exec
+ * case this build can translate, the host tools it may become and how each
+ * argument is renamed. Served at `/internal/translation` so a future dig —
+ * or a doctor — reads what the running shim actually does, not what a doc
+ * said it did at some point.
+ */
+export function translationMap() {
+	const entries = {};
+	for (const [caseName, cap] of Object.entries(CAPABILITY)) {
+		entries[caseName] = {
+			tools: [...cap.names],
+			args: Object.fromEntries(
+				Object.entries(cap.aliases ?? {}).map(([field, aliases]) => [
+					field,
+					{ to: aliases[0], fallbacks: aliases.slice(1) },
+				]),
+			),
+		};
+	}
+	return { execCases: entries };
 }

@@ -381,6 +381,16 @@ export function rejectionFor(exec, reason) {
 			return { field: 20, payload: fetchError(own, reason) };
 		case "writeShellStdinArgs":
 			return { field: 23, payload: errorResult(2, reason) };
+		case "shellAllowlistPrecheckArgs":
+		case "mcpAllowlistPrecheckArgs":
+		case "webFetchAllowlistPrecheckArgs": {
+			// The precheck result is a flat bool — `allowlisted = 1` — not an
+			// error oneof, so the generic error shape cannot answer it. False is
+			// the honest answer: the host's permission system is the allowlist,
+			// and nothing is pre-approved here. The real exec that follows is
+			// translated or refused on its own merits.
+			return { field: exec.field, payload: new Writer().varint(1, 0).finish() };
+		}
 		case "diagnosticsArgs":
 			return { field: 9, payload: new Writer().message(1, new Uint8Array(0)).finish() };
 		case "recordScreenArgs":
@@ -681,6 +691,81 @@ export function decodeExecServerMessage(bytes) {
 			if (field === 21) return { ...base, case: "recordScreenArgs" };
 			if (field === 22) return { ...base, case: "computerUseArgs" };
 			if (field === 23) return { ...base, case: "writeShellStdinArgs" };
+			// The rest of the oneof, named so counters and refusals are legible
+			// rather than "unknown #28". Schemas from cursor-agent's own bundle
+			// (2026.10.01) — see docs/CURSOR-PROTOCOL-SCHEMA.md for the table.
+			if (field === 27) return { ...base, case: "executeHookArgs" };
+			if (field === 28) return { ...base, case: "subagentArgs" };
+			if (field === 29) return { ...base, case: "redactedReadArgs" };
+			if (field === 30) return { ...base, case: "forceBackgroundShellArgs" };
+			if (field === 31) return { ...base, case: "forceBackgroundSubagentArgs" };
+			if (field === 36) return { ...base, case: "mcpStateExecArgs" };
+			if (field === 37) return { ...base, case: "subagentAwaitArgs" };
+			if (field === 38) return { ...base, case: "smartModeClassifierArgs" };
+			if (field === 40) return { ...base, case: "canvasDiagnosticsArgs" };
+			if (field === 41) return { ...base, case: "shellAllowlistPrecheckArgs" };
+			if (field === 42) return { ...base, case: "mcpAllowlistPrecheckArgs" };
+			if (field === 43) return { ...base, case: "webFetchAllowlistPrecheckArgs" };
+			if (field === 44) {
+				// GetDiffRequest | 5 target_paths* is repeated, so the generic
+				// reader (last-occurrence-wins) would keep one path; collect them.
+				const paths = [];
+				{
+					const ar = new Reader(payload);
+					while (!ar.done) {
+						const t2 = ar.tag();
+						if (t2.wireType !== 2) { ar.skip(t2.wireType); continue; }
+						const v = ar.bytes();
+						if (t2.field === 5) paths.push(new TextDecoder().decode(v));
+					}
+				}
+				args.paths = paths;
+				return { ...base, case: "gitDiffRequestArgs" };
+			}
+			if (field === 45) return { ...base, case: "piReadArgs" };
+			if (field === 46) return { ...base, case: "piBashArgs" };
+			if (field === 47) {
+				// PiEditExecArgs | 1 path | 2 edits* (PiEditReplacement | 1 old_text |
+				// 2 new_text). `edits` is repeated, so the generic positional reader
+				// (which keeps the last occurrence as text) cannot see it — decode
+				// the nested replacements here, where the Reader lives.
+				const edits = [];
+				{
+					const ar = new Reader(payload);
+					let path;
+					while (!ar.done) {
+						const t2 = ar.tag();
+						if (t2.wireType !== 2) { ar.skip(t2.wireType); continue; }
+						const v = ar.bytes();
+						if (t2.field === 1) path = new TextDecoder().decode(v);
+						else if (t2.field === 2) {
+							const inner = new Reader(v);
+							let oldText = "";
+							let newText = "";
+							while (!inner.done) {
+								const t3 = inner.tag();
+								if (t3.wireType !== 2) { inner.skip(t3.wireType); continue; }
+								const raw = inner.bytes();
+								const text = new TextDecoder().decode(raw);
+								if (t3.field === 1) oldText = text;
+								else if (t3.field === 2) newText = text;
+							}
+							edits.push({ oldText, newText });
+						}
+					}
+					args.edits = edits;
+					if (path !== undefined) args.fields[1] = path;
+				}
+				return { ...base, case: "piEditArgs" };
+			}
+			if (field === 48) return { ...base, case: "piWriteArgs" };
+			if (field === 49) return { ...base, case: "piGrepArgs" };
+			if (field === 50) return { ...base, case: "piFindArgs" };
+			if (field === 51) return { ...base, case: "piLsArgs" };
+			if (field === 52) return { ...base, case: "miniSweAgentBashArgs" };
+			if (field === 53) return { ...base, case: "conversationSearchArgs" };
+			if (field === 54) return { ...base, case: "agentStoreConflictArgs" };
+			if (field === 56) return { ...base, case: "adoptArgs" };
 			if (field !== EXEC_SPAN_CONTEXT_FIELD) unknownField ??= field;
 		} else {
 			reader.skip(wireType);

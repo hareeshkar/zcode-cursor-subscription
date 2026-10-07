@@ -40,7 +40,7 @@ import { AuthError, CursorAuthService } from "./auth.mjs";
 import { CredentialStore } from "./credentials.mjs";
 import { ConversationStore, planTurn } from "./conversation-store.mjs";
 import { buildRunRequest } from "./conversation.mjs";
-import { translateBuiltinExec } from "./translate.mjs";
+import { translateBuiltinExec, translationMap } from "./translate.mjs";
 import {
 	AgentRun,
 	decodeCheckpointUsedTokens,
@@ -613,6 +613,15 @@ export class CursorShim {
 				startedAt: this.#startedAt,
 				...this.metrics(),
 			}));
+			return;
+		}
+		if (url.pathname === "/internal/translation" && request.method === "GET") {
+			// The live translation contract: which Cursor exec cases this build
+			// can translate, into which host tools, with which argument renames.
+			// A future dig reads what the RUNNING shim does, not what a document
+			// said at some point.
+			response.writeHead(200, { "content-type": "application/json" });
+			response.end(JSON.stringify({ version: SHIM_VERSION, ...translationMap() }));
 			return;
 		}
 		if (url.pathname === "/health" && request.method === "GET") {
