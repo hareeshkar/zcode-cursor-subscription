@@ -44,34 +44,86 @@ bidirectional HTTP/2. A small local shim translates between the two and binds lo
 
 ### Tool calling — one contract, every repository
 
-Cursor's models natively call their own file/shell tools (`readArgs`, `grepArgs`, `shellArgs`, …).
-The shim translates each one into the matching ZCode tool **with the host's parameter names**, so
-nothing depends on the repository underneath:
+Cursor's models natively call their **own** tool set — 41 exec variants in Cursor's bundle, the
+same Unix primitives agents have wrapped for 30 years (read, write, search, list, run, fetch,
+diff, fork) under Cursor's names. The shim translates each onto ZCode's native tools **with the
+host's parameter names**, so nothing depends on the repository underneath. One row per native
+tool; `→` marks a translation, anything else is the typed reply that keeps the run alive.
 
-| Capability | Cursor native | → ZCode tool | Key argument renames |
+| Cursor native tool | Field | What it does | Handling |
 |---|---|---|---|
-| Read a file | `readArgs` | `Read` | `path` → `file_path` (+ `offset`/`limit`) |
-| Write a file | `writeArgs` | `Write` | `path` → `file_path`, `file_text` → `content` |
-| Search | `grepArgs` | `Grep` | `case_insensitive` → `-i`, flags match |
-| List | `lsArgs` | `Glob` | `pattern: "*"` synthesized |
-| Run a command | `shellArgs` / `shellStreamArgs` | `Bash` | `command` → `command` |
-| Fetch a URL | `fetchArgs` | `WebFetch` | `prompt` synthesized (host-required) |
-| Subagent | `subagentArgs` | `Agent` | `description` synthesized, `model_id` dropped |
-| Edit | `piEditArgs` (single edit) | `Edit` | `old_text` → `old_string`, `new_text` → `new_string` |
-| Diff | `gitDiffRequestArgs` | `Bash` | synthesized, shell-quoted `git diff` |
+| `shell_args` | 2 | [Run a shell command] One command, captured output | → `Bash` |
+| `write_args` | 3 | [Write a file] Full-file write (`path`, `file_text`) | → `Write` (`file_path`, `content`) |
+| `delete_args` | 4 | [Delete a file] | Refused — no safe host delete |
+| `grep_args` | 5 | [Search file contents] Regex, output mode, case flag, limits | → `Grep` (`case_insensitive`→`-i`) |
+| `read_args` | 7 | [Read a file] Contents with offset/limit | → `Read` (`path`→`file_path`) |
+| `ls_args` | 8 | [List a directory] | → `Glob` (`pattern: "*"` synthesized) |
+| `diagnostics_args` | 9 | [Get code diagnostics] LSP errors/warnings | Refused — LSP is the host's |
+| `request_context_args` | 10 | [Ask what tools exist] The declaration handshake | Served: host tool schemas |
+| `mcp_args` | 11 | [Call a registered tool] The declared-tool channel | Passed through verbatim |
+| `shell_stream_args` | 14 | [Stream a shell command] Live stdout/stderr events | → `Bash` |
+| `background_shell_spawn_args` | 16 | [Spawn a background shell] Long-running process | → `Bash` (normal call) |
+| `list_mcp_resources_exec_args` | 17 | [List MCP resources] | Refused |
+| `read_mcp_resource_exec_args` | 18 | [Read an MCP resource] | Refused |
+| `fetch_args` | 20 | [Fetch a URL] | → `WebFetch` (`prompt` synthesized) |
+| `record_screen_args` | 21 | [Record the screen] | Refused — no screen access |
+| `computer_use_args` | 22 | [Drive the computer] Mouse/keyboard control | Refused |
+| `write_shell_stdin_args` | 23 | [Feed a shell's stdin] | Refused |
+| `execute_hook_args` | 27 | [Run a lifecycle hook] | Refused (typed) |
+| `subagent_args` | 28 | [Dispatch a subagent] Nested agent, own type/model/prompt | → `Agent` (`description` synthesized) |
+| `redacted_read_args` | 29 | [Read a file, redacted] | → `Read` |
+| `force_background_shell_args` | 30 | [Background a shell] | Refused (typed) |
+| `force_background_subagent_args` | 31 | [Background a subagent] | Refused (typed) |
+| `mcp_state_exec_args` | 36 | [Poll MCP server state] | Refused (typed) |
+| `subagent_await_args` | 37 | [Await a subagent] | Refused (typed) |
+| `smart_mode_classifier_args` | 38 | [Classify the request] Internal routing | Refused (typed) |
+| `canvas_diagnostics_args` | 40 | [Canvas diagnostics] | Refused (typed) |
+| `shell_allowlist_precheck_args` | 41 | [Precheck a command] "Pre-approved?" | Answered `allowlisted=false` |
+| `mcp_allowlist_precheck_args` | 42 | [Precheck an MCP call] | Answered `allowlisted=false` |
+| `web_fetch_allowlist_precheck_args` | 43 | [Precheck a fetch] | Answered `allowlisted=false` |
+| `git_diff_request` | 44 | [Show a git diff] Structured refs/paths/context | → `Bash` (quoted `git diff`) |
+| `pi_read_args` | 45 | [Read a file] Pi family | → `Read` |
+| `pi_bash_args` | 46 | [Run a command] Pi family, with timeout | → `Bash` |
+| `pi_edit_args` | 47 | [Edit by replacement] `{old_text→new_text}` list | → `Edit` (single edit; multi-edit refused) |
+| `pi_write_args` | 48 | [Write a file] Pi family | → `Write` |
+| `pi_grep_args` | 49 | [Search file contents] Pi family | → `Grep` |
+| `pi_find_args` | 50 | [Find files by name] Pi family | → `Glob` |
+| `pi_ls_args` | 51 | [List a directory] Pi family | → `Glob` |
+| `mini_swe_agent_bash_args` | 52 | [Mini-agent bash] | Refused (typed) |
+| `conversation_search_args` | 53 | [Search past chats] | Refused (typed) |
+| `agent_store_conflict_args` | 54 | [Resolve a store conflict] | Refused (typed) |
+| `adopt_args` | 56 | [Adopt a session] | Refused (typed) |
 
-Every ZCode tool is *also* registered with Cursor as a first-class tool, so models can call them
-directly by the host's own schemas. Two guarantees hold on the translation path: arguments always
-match the host's declared schema (a wrong parameter name is not an error you can see — it is a call
-that fails validation on every retry), and a call that cannot satisfy the host's required fields is
-refused with a legible typed reply instead of emitted and doomed. Execs with no host counterpart
-are refused the same way — never left unanswered, which would hang the run.
+Variants Cursor ships later get the last handling automatically: a generic typed reply on the
+message's own field, so a run never hangs on an unknown tool.
 
-The full table — every exec variant Cursor's bundle defines, including its second "pi" tool family,
-what is translated, passed through, or refused and with which typed reply — lives in
-[`docs/TRANSLATION-MAP.md`](../docs/TRANSLATION-MAP.md). The machine-readable contract is served
-live by the running shim at `GET /internal/translation`, and `/internal/status` counts translations
-per exec case, so you can always see which path a turn actually took.
+**The other side — ZCode's native tools we translate onto** (every one is also registered with
+Cursor as a first-class tool via `mcp_args`, so models can call them directly):
+
+| ZCode tool | What it does | Schema facts that matter |
+|---|---|---|
+| `Read` | [Read a file] 1-based line offset/count, 2,000-line default | `file_path` **required** |
+| `Write` | [Write a file] Create or overwrite | `file_path` + `content` **required** |
+| `Edit` | [Replace text in a file] Exact match, optional replace-all | `file_path`, `old_string`, `new_string` **required** |
+| `Bash` | [Run a shell command] Timeout, background, sandbox | `command` **required**; **strict** schema |
+| `Grep` | [Search file contents] Ripgrep, output modes, flags | `pattern` **required**; `output_mode` enum |
+| `Glob` | [List files by pattern] The only listing tool | `pattern` **required** |
+| `WebFetch` | [Fetch a URL and answer about it] Cached 15 min | `url` + `prompt` **required** |
+| `Agent` | [Dispatch a subagent] Own context and tool profile | `description` + `prompt` **required** |
+
+Plus the rest of the host toolbox through the declared-tool channel: `WebSearch`, `TodoRead`/
+`TodoWrite`, `TaskOutput`/`TaskStop`, `Skill`, `AskUserQuestion`, `EnterPlanMode`/`ExitPlanMode`,
+the `Cron*` family, agent messaging, `ListModels`, `js`, and the workflow tools.
+
+Two guarantees hold on the translation path: arguments always match the host's declared schema
+(a wrong parameter name is not an error you can see — it is a call that fails validation on
+every retry), and a call that cannot satisfy the host's required fields is refused with a
+legible typed reply instead of emitted and doomed.
+
+The argument-level detail — every rename, every synthesized field, every typed reply shape — is
+in [`docs/TRANSLATION-MAP.md`](../docs/TRANSLATION-MAP.md). The machine-readable contract is
+served live by the running shim at `GET /internal/translation`, and `/internal/status` counts
+translations per exec case, so you can always see which path a turn actually took.
 
 ### Context and cost
 

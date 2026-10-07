@@ -36,6 +36,98 @@ at `GET /internal/translation` — read that when you want what the code does
 
 ---
 
+## The complete native inventory — every tool Cursor's bundle defines
+
+One row per exec variant in `ExecServerMessage` (fields 2–56, from
+cursor-agent 2026.10.01). **Handling** is what this shim does with it:
+`→ Tool` means it becomes a ZCode tool call; anything else is a typed reply
+that keeps the run alive.
+
+| Cursor native tool | Field | What it does | Handling |
+|---|---|---|---|
+| `shell_args` | 2 | [Run a shell command] Execute one command synchronously and return stdout/stderr/exit code. | → `Bash` (`command`) |
+| `write_args` | 3 | [Write a file] Create or overwrite a file with full contents (`path`, `file_text`). | → `Write` (`file_path`, `content`) |
+| `delete_args` | 4 | [Delete a file] Remove a file from the workspace. | Refused: `DeleteResult.rejected=6` — no safe host delete |
+| `grep_args` | 5 | [Search file contents] Regex search across files with output mode, case flag, head limit, multiline. | → `Grep` (flags incl. `case_insensitive`→`-i`) |
+| `read_args` | 7 | [Read a file] Return a file's contents, optionally from a line offset for a line count. | → `Read` (`path`→`file_path`, `offset`, `limit`) |
+| `ls_args` | 8 | [List a directory] Return a directory tree listing. | → `Glob` (`pattern: "*"` synthesized) |
+| `diagnostics_args` | 9 | [Get code diagnostics] Ask for LSP errors/warnings on files. | Refused: empty success — LSP state is the host's |
+| `request_context_args` | 10 | [Ask what tools exist] The handshake: server asks for tool schemas, rules, env. | Served: every host tool's JSON schema |
+| `mcp_args` | 11 | [Call a registered tool] Invoke one of the MCP tools the client declared — the declared-tool channel. | Passed through verbatim (already host-shaped) |
+| `shell_stream_args` | 14 | [Stream a shell command] Run a command and stream stdout/stderr events live. | → `Bash` (`command`) |
+| `background_shell_spawn_args` | 16 | [Spawn a background shell] Start a long-running process (dev server, watch) addressable later. | → `Bash` (runs as a normal call) |
+| `list_mcp_resources_exec_args` | 17 | [List MCP resources] Enumerate resources exposed by MCP servers. | Refused: `McpResult.error` |
+| `read_mcp_resource_exec_args` | 18 | [Read an MCP resource] Fetch one MCP resource's contents. | Refused: `McpResult.error` |
+| `fetch_args` | 20 | [Fetch a URL] Retrieve a web page. | → `WebFetch` (`url`; `prompt` synthesized — host-required) |
+| `record_screen_args` | 21 | [Record the screen] Screen capture via accessibility APIs. | Refused: `McpResult.error` — no screen access |
+| `computer_use_args` | 22 | [Drive the computer] Mouse/keyboard control of the desktop. | Refused: `McpResult.error` |
+| `write_shell_stdin_args` | 23 | [Feed a shell's stdin] Write input to a previously spawned shell. | Refused: `error=2` — no stdin stream to feed |
+| `execute_hook_args` | 27 | [Run a lifecycle hook] Execute a registered hook (pre-compact, stop, …). | Refused: generic error on own field |
+| `subagent_args` | 28 | [Dispatch a subagent] Spawn a nested agent with its own type, model and prompt. | → `Agent` (`description` synthesized, `model_id` dropped) |
+| `redacted_read_args` | 29 | [Read a file, redacted] Variant of read with server-side content redaction. | → `Read` (same schema; the host is the executor) |
+| `force_background_shell_args` | 30 | [Background a shell] Move a running shell to the background. | Refused: generic — no host mechanism |
+| `force_background_subagent_args` | 31 | [Background a subagent] Move a running subagent to the background. | Refused: generic |
+| `mcp_state_exec_args` | 36 | [Poll MCP server state] Check whether MCP servers are alive. (Long misread as "provider routing" — its `server_identifiers` named our provider.) | Refused: generic (proven to resume the run) |
+| `subagent_await_args` | 37 | [Await a subagent] Wait for a background subagent's result. | Refused: generic |
+| `smart_mode_classifier_args` | 38 | [Classify the request] Internal smart-mode routing classifier. | Refused: generic |
+| `canvas_diagnostics_args` | 40 | [Canvas diagnostics] Diagnostics for Cursor's canvas feature. | Refused: generic |
+| `shell_allowlist_precheck_args` | 41 | [Precheck a command] "Is this command pre-approved?" before running it. | Answered: flat `allowlisted=false` — the host's permission system is the allowlist |
+| `mcp_allowlist_precheck_args` | 42 | [Precheck an MCP call] Same, for tool calls. | Answered: `allowlisted=false` |
+| `web_fetch_allowlist_precheck_args` | 43 | [Precheck a fetch] Same, for URL fetches. | Answered: `allowlisted=false` |
+| `git_diff_request` | 44 | [Show a git diff] Structured diff request: cwd, refs, paths, context lines. | → `Bash` (synthesized, shell-quoted `git diff`) |
+| `pi_read_args` | 45 | [Read a file] Pi family: same primitive, simpler args. | → `Read` |
+| `pi_bash_args` | 46 | [Run a command] Pi family, with a timeout field. | → `Bash` (`timeout` carried) |
+| `pi_edit_args` | 47 | [Edit by replacement] One file, a list of `{old_text, new_text}` replacements. | → `Edit` for a single replacement; multi-edit refused rather than lose all but the first |
+| `pi_write_args` | 48 | [Write a file] Pi family. | → `Write` |
+| `pi_grep_args` | 49 | [Search file contents] Pi family, with ignore-case, context and limit. | → `Grep` (`ignore_case`→`-i`, `literal` dropped) |
+| `pi_find_args` | 50 | [Find files by name] Pi family pattern search. | → `Glob` |
+| `pi_ls_args` | 51 | [List a directory] Pi family. | → `Glob` |
+| `mini_swe_agent_bash_args` | 52 | [Mini-agent bash] Empty-args bash for Cursor's mini SWE-agent. | Refused: generic |
+| `conversation_search_args` | 53 | [Search past chats] Query the user's conversation history. | Refused: generic |
+| `agent_store_conflict_args` | 54 | [Resolve a store conflict] Internal agent-store reconciliation. | Refused: generic |
+| `adopt_args` | 56 | [Adopt a session] Take over another agent's session/state. | Refused: generic |
+
+Unassigned fields in 1–56: 1, 6, 12, 13, 15, 24–26, 32–35, 39. Anything new
+Cursor ships lands in the last row's handling automatically: a generic typed
+reply on the message's own field, so the run never hangs.
+
+## The other side — ZCode's native tools we translate onto
+
+These are the "old native" tools: the primitives every harness has exposed
+since the Unix days, under ZCode's own names and schemas. The first eight are
+translation targets; the rest of the host toolbox is reachable through the
+declared-tool channel (`mcp_args`).
+
+| ZCode tool | What it does | Schema facts that matter |
+|---|---|---|
+| `Read` | [Read a file] Contents with 1-based line offset/count, line numbers, 2,000-line default cap. | `file_path` **required**; `offset`/`limit` optional ints; rejects binary/device paths |
+| `Write` | [Write a file] Create or overwrite with full contents. | `file_path` + `content` both **required** |
+| `Edit` | [Replace text in a file] Exact string replacement, optional replace-all. | `file_path`, `old_string`, `new_string` all **required**; `replace_all` default false |
+| `Bash` | [Run a shell command] One command, captured output, optional timeout/background/sandbox escape. | `command` **required**; `timeout` ≤ 600,000 ms; schema is **strict** — unknown keys rejected |
+| `Grep` | [Search file contents] Ripgrep with output modes and flags. | `pattern` **required**; `output_mode` enum `content\|files_with_matches\|count` (default `files_with_matches`); `-i`, `glob`, `head_limit` (default 250), `context` |
+| `Glob` | [List files by pattern] Glob-based file listing — the only listing tool. | `pattern` **required**; `path` optional |
+| `WebFetch` | [Fetch a URL and answer about it] Retrieves the page and answers a prompt against it; cached 15 min. | `url` + `prompt` both **required** |
+| `Agent` | [Dispatch a subagent] Spawns a nested agent with its own context and tool profile. | `description` + `prompt` **required**; `subagent_type` free string; `run_in_background` |
+
+The rest of the host toolbox, one line each — all reachable via the declared-tool channel:
+
+| ZCode tool | What it does |
+|---|---|
+| `WebSearch` | [Search the web] Query (min 2 chars), domain allow/block lists; strict schema |
+| `TodoRead` / `TodoWrite` | [Task list state] Read / replace the session's todo list |
+| `TaskOutput` | [Read a task's output] Background shell/agent output (aliases `BashOutput`, `AgentOutput`) |
+| `TaskStop` | [Kill a task] Stop a background shell/agent (aliases `KillShell`, `KillBash`) |
+| `Skill` | [Invoke a skill] Run a registered slash-command skill |
+| `AskUserQuestion` | [Ask the user] Structured multiple-choice question |
+| `EnterPlanMode` / `ExitPlanMode` | [Plan] Switch to read-only planning / present a plan for approval |
+| `CronCreate` / `CronUpdate` / `CronList` / `CronDelete` | [Schedule work] CRUD for scheduled automations |
+| `SendMessage` / `RespondToCoordinator` | [Agent-to-agent messaging] Coordinate with sibling agents |
+| `ListModels` | [List providers] The host's model inventory |
+| `js` | [Node REPL] Evaluate JavaScript (browser/computer-use support) |
+| Workflow family | [Dynamic workflows] Create/amend/run workflow scripts (gated) |
+
+---
+
 ## Translated — Cursor's native exec becomes a ZCode tool call
 
 | Capability | Unix primitive | Cursor exec (wire field) | Cursor args → ZCode params | ZCode tool | Synthesized / dropped | Status |
