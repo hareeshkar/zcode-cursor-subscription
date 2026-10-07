@@ -326,6 +326,12 @@ model's behalf.
 Every one of these is reported by the tooling rather than hidden — `cursor_doctor` lists what a session
 approximated, and `cursor_status` shows the counters.
 
+**One serving shim owns the counters.** ZCode spawns a shim per session; when the port is already held,
+the new process adopts it instead of binding. `/cursor-status` detects that and queries the serving
+instance's `/internal/status` (pid, version, start time, turns, delivered, dropped), so the numbers
+always describe the actual traffic — never the zeros of a process that only adopted the port. If the
+serving shim is an older version, the status says so and recommends a restart.
+
 ### How we know what ran
 
 Every claim above traces to a recorded run, not to a reading of the code. The
