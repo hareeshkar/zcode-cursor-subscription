@@ -155,6 +155,47 @@ reading the code. Calls now render as `[TOOL CALL] <name> <args>` and results as
 `[TOOL RESULT (<tool>)]`, with tests for the arguments-missing case so the name
 cannot be lost one level down.
 
+### The sixth defect: translated calls used Cursor's parameter names, and the host rejected every one
+
+The built-in-to-host translation (readArgs → Read, writeArgs → Write, ...)
+matched tool NAMES but passed Cursor's argument names through untouched. ZCode
+strips unknown keys before validating, so a translated read arrived as
+`{"path": "..."}` — the `path` key was stripped, the required `file_path` was
+missing, and the call failed `inputSchema` validation. The model received
+`<tool_use_error>The required parameter 'file_path' is missing</tool_use_error>`
+as a tool result, retried, and the translator regenerated the identical broken
+shape. Live evidence: in one turn, a model's Bash translation worked (both sides
+call it `command`) while four consecutive Read calls failed — the model looked
+broken when the translation was.
+
+Why the suite stayed green: the test fixture *invented* a host schema whose Read
+wanted `path`, and the tests asserted the wrong names against it. A fixture that
+does not match the real host is a blind instrument — it passes and proves
+nothing. The fixtures are now copied from ZCode's contracts source
+(`apps/zcode-cli/packages/contracts/src/tools/*.ts`).
+
+The fix has two halves, both load-bearing:
+
+1. **Alias maps per exec case.** `readArgs` path→`file_path` (offset/limit pass
+   through), `writeArgs` path→`file_path` and file_text→`content`, `fetchArgs`
+   gains the `prompt` ZCode requires (synthesized, Cursor sends none), `lsArgs`
+   gains a `pattern` for Glob. The alias actually used is whichever one the
+   host's declared schema knows, so the mapping adapts if names change again.
+2. **A required-field gate.** If any `required` field of the host's declared
+   schema cannot be produced, the translation declines and the typed rejection
+   follows — naming the tools that do exist. A call that will fail validation is
+   never emitted; emitting it anyway is the wedge, because the retry loop only
+   ends when the run is cut off.
+
+Verified live on the serving shim (0.21.1): `grok-4.7-high-fast` and
+`gpt-5.6-luna-medium-fast` each drove a native `readArgs` → `Read({"file_path":
+...})` loop, recalled a canary from the file body, with `translated` counters
+(`{"readArgs": 1}` per model) distinguishing the native-exec path from declared
+`mcp_args` calls, and `droppedToolCalls` delta zero. The counters and a
+`translated built-in exec` log line are permanent: without them the two paths
+are indistinguishable from the host side, and a regression in either reads as
+"tools broken" with no way to tell which path went silent.
+
 ---
 
 ### The native history path: built, verified, and not adopted

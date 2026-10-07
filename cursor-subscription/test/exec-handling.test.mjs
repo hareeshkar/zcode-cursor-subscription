@@ -173,6 +173,7 @@ test("metrics start balanced, so a divergence is always a real signal", async ()
 	for (const key of ["toolRequests", "toolCalls", "droppedToolCalls", "turns", "conversations"]) {
 		assert.equal(m[key], 0, `${key} must start at 0`);
 	}
+	assert.deepEqual(m.translated, {}, "translated-exec counts start empty, by exec case");
 	await shim.close();
 });
 
@@ -663,65 +664,143 @@ test("the SSE error frame shape matches the host union: flat string error", () =
 
 import { translateBuiltinExec } from "../lib/translate.mjs";
 
+// ZCode's REAL declared schemas, copied from its contracts source
+// (apps/zcode-cli/packages/contracts/src/tools/*.ts), not invented ones. The
+// old fixture invented a Read that wanted `path`; the suite then asserted the
+// wrong parameter names against it and stayed green while every live Read
+// failed validation — the host requires `file_path`. A fixture that does not
+// match the host is a blind instrument: it passes the tests and proves nothing.
 const HOST_TOOLS = [
   { function: { name: "Bash", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } } },
-  { function: { name: "Read", parameters: { type: "object", properties: { path: { type: "string" }, offset: { type: "number" }, limit: { type: "number" } }, required: ["path"] } } },
+  { function: { name: "Read", parameters: { type: "object", properties: { file_path: { type: "string" }, offset: { type: "number" }, limit: { type: "number" } }, required: ["file_path"] } } },
   { function: { name: "Grep", parameters: { type: "object", properties: { pattern: { type: "string" }, path: { type: "string" }, glob: { type: "string" } }, required: ["pattern"] } } },
-  { function: { name: "Write", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } } },
+  { function: { name: "Write", parameters: { type: "object", properties: { file_path: { type: "string" }, content: { type: "string" } }, required: ["file_path", "content"] } } },
+  { function: { name: "WebFetch", parameters: { type: "object", properties: { url: { type: "string" }, prompt: { type: "string" } }, required: ["url", "prompt"] } } },
+  { function: { name: "Glob", parameters: { type: "object", properties: { pattern: { type: "string" }, path: { type: "string" } }, required: ["pattern"] } } },
 ];
 const HOST_NAMES = new Set(HOST_TOOLS.map((t) => t.function.name));
 
-test("Cursor's read exec translates into the host's Read with the same path", () => {
+test("Cursor's read exec translates with the host's file_path, never its own path", () => {
+  // The live failure: Cursor sends `path`, ZCode's Read requires `file_path`,
+  // unknown keys are stripped, and the call dies with "required parameter
+  // `file_path` is missing" on every retry.
   const translated = translateBuiltinExec(
-    { case: "readArgs", field: 7, execId: "e1", args: { primary: "/srv/app.ini" } },
+    { case: "readArgs", field: 7, execId: "e1", args: { primary: "/srv/app.ini", fields: { 1: "/srv/app.ini" } } },
     HOST_NAMES, HOST_TOOLS,
   );
   assert.equal(translated.toolName, "Read");
   const args = JSON.parse(translated.arguments);
-  assert.equal(args.path, "/srv/app.ini");
+  assert.equal(args.file_path, "/srv/app.ini");
+  assert.ok(!("path" in args), "the host's schema has no `path`; sending it is how calls failed validation");
   // offset/limit were not sent by Cursor, so they must not be invented
   assert.equal("offset" in args, false);
+  assert.equal("limit" in args, false);
+});
+
+test("read offset and limit survive as numbers the host schema accepts", () => {
+  // ReadArgs carries offset/limit as varints at fields 4/5; the decoder used
+  // to drop every non-string field, so the translation could never forward them.
+  const exec = decodeExecServerMessage(
+    execFrame({
+      fields: [[7, new Writer().string(1, "/srv/big.log").varint(4, 1200).varint(5, 40).finish()]],
+    }),
+  );
+  assert.equal(exec.case, "readArgs");
+  assert.equal(exec.args.fields[4], 1200, "the varint is captured, not skipped");
+
+  const translated = translateBuiltinExec(exec, HOST_NAMES, HOST_TOOLS);
+  const args = JSON.parse(translated.arguments);
+  assert.equal(args.file_path, "/srv/big.log");
+  assert.equal(args.offset, 1200);
+  assert.equal(args.limit, 40);
+});
+
+test("Cursor's write exec maps path/file_text onto file_path/content", () => {
+  // Cursor WriteArgs | 1 path | 2 file_text — the host wants file_path/content,
+  // both required. A `path` here is stripped and the call fails validation.
+  const translated = translateBuiltinExec(
+    { case: "writeArgs", field: 3, execId: "e4", args: { primary: "/tmp/a.txt", second: "hello", fields: { 1: "/tmp/a.txt", 2: "hello" } } },
+    HOST_NAMES, HOST_TOOLS,
+  );
+  assert.equal(translated.toolName, "Write");
+  const args = JSON.parse(translated.arguments);
+  assert.equal(args.file_path, "/tmp/a.txt");
+  assert.equal(args.content, "hello");
+});
+
+test("Cursor's fetch exec synthesizes the prompt the host requires", () => {
+  // ZCode's WebFetch requires url AND prompt. Cursor sends only the url, so an
+  // untranslated fetch always failed validation; a neutral prompt satisfies it.
+  const translated = translateBuiltinExec(
+    { case: "fetchArgs", field: 20, execId: "e5", args: { primary: "https://example.com", fields: { 1: "https://example.com" } } },
+    HOST_NAMES, HOST_TOOLS,
+  );
+  assert.equal(translated.toolName, "WebFetch");
+  const args = JSON.parse(translated.arguments);
+  assert.equal(args.url, "https://example.com");
+  assert.equal(typeof args.prompt, "string");
+  assert.ok(args.prompt.length > 0);
+});
+
+test("an ls exec becomes a Glob with a synthesized listing pattern", () => {
+  const translated = translateBuiltinExec(
+    { case: "lsArgs", field: 8, execId: "e6", args: { primary: "/srv", fields: { 1: "/srv" } } },
+    HOST_NAMES, HOST_TOOLS,
+  );
+  assert.equal(translated.toolName, "Glob");
+  const args = JSON.parse(translated.arguments);
+  assert.equal(args.pattern, "*", "Glob's required pattern, synthesized — Cursor sends only a path");
+  assert.equal(args.path, "/srv");
 });
 
 test("Cursor's streaming shell exec translates into the host's Bash command", () => {
   const translated = translateBuiltinExec(
-    { case: "shellStreamArgs", field: 14, execId: "e2", args: { primary: "git status" } },
+    { case: "shellStreamArgs", field: 14, execId: "e2", args: { primary: "git status", fields: { 1: "git status" } } },
     HOST_NAMES, HOST_TOOLS,
   );
   assert.equal(translated.toolName, "Bash");
   assert.equal(JSON.parse(translated.arguments).command, "git status");
 });
 
-test("Cursor's grep exec maps pattern and optional path onto the host's Grep", () => {
+test("Cursor's grep exec maps pattern and optional path and glob onto Grep", () => {
   const translated = translateBuiltinExec(
-    { case: "grepArgs", field: 5, execId: "e3", args: { primary: "TODO", second: "src/" } },
+    { case: "grepArgs", field: 5, execId: "e3", args: { primary: "TODO", second: "src/", third: "*.cs", fields: { 1: "TODO", 2: "src/", 3: "*.cs" } } },
     HOST_NAMES, HOST_TOOLS,
   );
   const args = JSON.parse(translated.arguments);
   assert.equal(args.pattern, "TODO");
   assert.equal(args.path, "src/");
+  assert.equal(args.glob, "*.cs");
 });
 
-test("Cursor's write exec maps path and file_text onto the host's Write content", () => {
+test("a translation that cannot satisfy a required field is refused, not emitted", () => {
+  // The gate. A host schema demanding a parameter this exec can never produce
+  // must yield null — the typed rejection then names the real tools. Emitting
+  // the call anyway is the wedge: the model retries and gets the same invalid
+  // shape back, forever.
+  const pickyHost = [
+    { function: { name: "Read", parameters: { type: "object", properties: { file_path: { type: "string" }, checksum: { type: "string" } }, required: ["file_path", "checksum"] } } },
+  ];
   const translated = translateBuiltinExec(
-    { case: "writeArgs", field: 3, execId: "e4", args: { primary: "/tmp/a.txt", second: "hello" } },
-    HOST_NAMES, HOST_TOOLS,
+    { case: "readArgs", field: 7, args: { primary: "/x", fields: { 1: "/x" } } },
+    new Set(["Read"]), pickyHost,
   );
-  const args = JSON.parse(translated.arguments);
-  assert.equal(args.path, "/tmp/a.txt");
-  assert.equal(args.content, "hello");
+  assert.equal(translated, null, "a call that will fail validation must not be emitted");
 });
 
-test("arguments are checked against the host schema, so wrong param names cannot pass", () => {
-  // The model's confusion in live testing was passing file_path where the host
-  // wants path. The schema intersection guarantees host-shaped arguments.
+test("aliases adapt when a host declares Cursor's own parameter name", () => {
+  // The alias list prefers the host's canonical name but falls back to one the
+  // schema actually declares, so the same translation serves a host that kept
+  // Cursor's spelling.
+  const cursorSpelledHost = [
+    { function: { name: "Read", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } },
+  ];
   const translated = translateBuiltinExec(
-    { case: "readArgs", field: 7, args: { primary: "/x" } },
-    HOST_NAMES, HOST_TOOLS,
+    { case: "readArgs", field: 7, args: { primary: "/x", fields: { 1: "/x" } } },
+    new Set(["Read"]), cursorSpelledHost,
   );
   const args = JSON.parse(translated.arguments);
-  assert.ok("path" in args, "path is what the host schema declares");
-  assert.ok(!("file_path" in args));
+  assert.equal(args.path, "/x", "the alias the schema declares is the one used");
 });
 
 test("an exec with no matching host tool falls back to refusal", () => {
@@ -737,6 +816,14 @@ test("an exec with no matching host tool falls back to refusal", () => {
 test("mcp_args and request_context_args are never translated", () => {
   assert.equal(translateBuiltinExec({ case: "mcpArgs", field: 11 }, HOST_NAMES, HOST_TOOLS), null);
   assert.equal(translateBuiltinExec({ case: "requestContextArgs", field: 10 }, HOST_NAMES, HOST_TOOLS), null);
+});
+
+test("the translated call id is sanitized even when the exec id is absent", () => {
+  const translated = translateBuiltinExec(
+    { case: "readArgs", field: 7, args: { primary: "/x", fields: { 1: "/x" } } },
+    HOST_NAMES, HOST_TOOLS,
+  );
+  assert.match(translated.callId, /^[A-Za-z0-9_-]+$/, "only id-safe characters");
 });
 
 // --- tool-call id sanitization: the newline that stalled ZCode --------------

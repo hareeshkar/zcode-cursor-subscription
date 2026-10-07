@@ -266,7 +266,7 @@ export class CursorShim {
 	#preferredPort;
 	#adoptedPort = null;
 	#adoptionTimer;
-	#stats = { turns: 0, resumed: 0, replayed: 0, toolCalls: 0, toolRequests: 0, droppedToolCalls: 0 };
+	#stats = { turns: 0, resumed: 0, replayed: 0, toolCalls: 0, toolRequests: 0, droppedToolCalls: 0, translated: {} };
 	// Liveness. There is no model-status endpoint in Cursor's protocol, so the
 	// only honest answer to "is the model stuck?" is when the last frame arrived
 	// and what we last did with it. Frames still arriving means the model is
@@ -377,7 +377,7 @@ export class CursorShim {
 	}
 
 	resetMetrics() {
-		this.#stats = { turns: 0, resumed: 0, replayed: 0, toolCalls: 0, toolRequests: 0, droppedToolCalls: 0 };
+		this.#stats = { turns: 0, resumed: 0, replayed: 0, toolCalls: 0, toolRequests: 0, droppedToolCalls: 0, translated: {} };
 		this.#liveness = { frames: 0, lastFrameAt: 0, lastAction: "none" };
 		this.#unknownFrames.clear();
 		this.#unanswered.clear();
@@ -999,6 +999,15 @@ export class CursorShim {
 						// the typed refusal follow — naming the tools that do exist.
 						const translated = translateBuiltinExec(exec, toolNames, declared);
 						if (translated) {
+							// Counted by exec case, separately from mcp_args tool calls: the
+							// two paths are indistinguishable from the host side, and without
+							// this a regression in either one reads as "tools work" or "tools
+							// broken" with no way to tell which path went silent.
+							this.#stats.translated[exec.case] = (this.#stats.translated[exec.case] ?? 0) + 1;
+							this.log(
+								"translated built-in exec",
+								`${exec.case} → ${translated.toolName} ${translated.arguments.slice(0, 80)}`,
+							);
 							toolCall = {
 								id: translated.callId,
 								type: "function",

@@ -355,25 +355,30 @@ export function encodeMcpToolDefinition({ name, description, inputSchema, provid
  * even though a wrong-but-present reply works for some execs.
  */
 export function rejectionFor(exec, reason) {
+	// The exec's own argument (command, path, pattern, url) is echoed back so the
+	// server can pair the rejection with what it asked for. It lives in
+	// `exec.args` — the positional aliases used here previously did not exist on
+	// the decoded exec, so every rejection echoed an empty string.
+	const own = exec.args?.primary;
 	switch (exec.case) {
 		case "shellArgs":
-			return { field: 2, payload: shellRejectedResult(4, exec.command, reason) };
+			return { field: 2, payload: shellRejectedResult(4, own, reason) };
 		case "shellStreamArgs":
-			return { field: 14, payload: shellRejectedResult(5, exec.command, reason) };
+			return { field: 14, payload: shellRejectedResult(5, own, reason) };
 		case "backgroundShellSpawnArgs":
-			return { field: 16, payload: shellRejectedResult(3, exec.command, reason) };
+			return { field: 16, payload: shellRejectedResult(3, own, reason) };
 		case "readArgs":
-			return { field: 7, payload: pathRejected(3, exec.path, reason) };
+			return { field: 7, payload: pathRejected(3, own, reason) };
 		case "lsArgs":
-			return { field: 8, payload: pathRejected(3, exec.path, reason) };
+			return { field: 8, payload: pathRejected(3, own, reason) };
 		case "grepArgs":
-			return { field: 5, payload: errorResult(2, exec.pattern || reason) };
+			return { field: 5, payload: errorResult(2, own || reason) };
 		case "writeArgs":
-			return { field: 3, payload: pathRejected(6, exec.path, reason) };
+			return { field: 3, payload: pathRejected(6, own, reason) };
 		case "deleteArgs":
-			return { field: 4, payload: pathRejected(6, exec.path, reason) };
+			return { field: 4, payload: pathRejected(6, own, reason) };
 		case "fetchArgs":
-			return { field: 20, payload: fetchError(exec.url, reason) };
+			return { field: 20, payload: fetchError(own, reason) };
 		case "writeShellStdinArgs":
 			return { field: 23, payload: errorResult(2, reason) };
 		case "diagnosticsArgs":
@@ -634,18 +639,28 @@ export function decodeExecServerMessage(bytes) {
 			// schemas (ShellArgs|1 tool_call_id, ReadArgs|1 path|4 offset|5 limit,
 			// GrepArgs|1 pattern|2 path|3 glob, WriteArgs|1 path|2 file_text,
 			// FetchArgs|1 url, BackgroundShellSpawnArgs|1 command, ...).
-			const args = {};
+			//
+			// `fields` keeps every argument by number — strings and varints alike.
+			// The positional aliases only ever saw length-delimited fields 1-4, so
+			// ReadArgs' offset and limit (varints at 4 and 5) were dropped before
+			// the translation layer could pass them on.
+			const args = { fields: {} };
 			{
 				const ar = new Reader(payload);
 				while (!ar.done) {
 					const t2 = ar.tag();
-					if (t2.wireType !== 2) { ar.skip(t2.wireType); continue; }
-					const v = ar.bytes();
-					const text = new TextDecoder().decode(v);
-					if (t2.field === 1) args.primary = text;
-					else if (t2.field === 2) args.second = text;
-					else if (t2.field === 3) args.third = text;
-					else if (t2.field === 4) args.fourth = text;
+					if (t2.wireType === 2) {
+						const text = new TextDecoder().decode(ar.bytes());
+						args.fields[t2.field] = text;
+						if (t2.field === 1) args.primary = text;
+						else if (t2.field === 2) args.second = text;
+						else if (t2.field === 3) args.third = text;
+						else if (t2.field === 4) args.fourth = text;
+					} else if (t2.wireType === 0) {
+						args.fields[t2.field] = ar.varint();
+					} else {
+						ar.skip(t2.wireType);
+					}
 				}
 			}
 			const base = { id, execId, field, args };
