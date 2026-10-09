@@ -16,7 +16,7 @@ Do not edit `provider_config.json`, `installed_plugins.json`, or anything under 
 with your own file tools. A hand edit has no atomic write, no schema awareness, can destroy the user's
 other providers, and will not match what the plugin's own registration expects.
 
-Pass `models` only if the user asks for a specific number; the default publishes 12.
+Pass `models: N` only if the user asks for a short list; the default publishes every model the account can use — the picker searches, and the probe set is separate (six cheap models, so the real billable checks stay small).
 
 ## If the tool is not available
 

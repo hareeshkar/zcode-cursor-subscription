@@ -22,7 +22,7 @@ import { join } from "node:path";
 import { CursorAuthService } from "../lib/auth.mjs";
 import { CredentialStore } from "../lib/credentials.mjs";
 import { CursorShim } from "../lib/shim.mjs";
-import { fetchUsableModels, modelIds, sortModelsByName } from "../lib/cursor-client.mjs";
+import { fetchUsableModels, formatModelList, modelIds, sortModelsByName } from "../lib/cursor-client.mjs";
 import { pickProbeModels, probeModel } from "../lib/selftest.mjs";
 import { registerModels, ensureShimProvider, reconcileProviderKey } from "../lib/register-provider.mjs";
 import { removeShimProvider, removePluginInstallation } from "../lib/uninstall.mjs";
@@ -222,7 +222,10 @@ const TOOLS = [
 			const token = await auth.accessToken();
 			const available = sortModelsByName(await fetchUsableModels(token));
 			const limit = Math.min(Math.max(Number(args.models) || 6, 1), 10);
-			const picked = pickProbeModels(available, { limit });
+			// `pickProbeModels` selects among model IDS; passing the capability
+			// OBJECTS silently filtered everything out, so this tool probed zero
+			// models and reported a broken setup every time.
+			const picked = pickProbeModels(modelIds(available), { limit });
 
 			const results = [];
 			for (const model of picked) {
@@ -433,7 +436,7 @@ const TOOLS = [
 			// published list is alphabetical, so its first entry is whatever model
 			// happens to sort first — which would walk a new user straight onto a
 			// premium model and spend their credits on the first message.
-			const suggested = passed[0]?.model ?? modelsToPublish[0];
+			const suggested = passed[0]?.model ?? modelIds(modelsToPublish)[0] ?? FALLBACK_MODELS[0];
 			// by hand. On the success path everything above is already written to
 			// ZCode's config, so a copy-paste block is noise — and echoing a
 			// credential the user has no use for is a small risk for no gain.
@@ -788,11 +791,21 @@ const TOOLS = [
 			try {
 				const token = await auth.accessToken();
 				const models = sortModelsByName(await fetchUsableModels(token));
-				return content(models.length ? models.join("\n") : FALLBACK_MODELS.join("\n"));
+				if (models.length === 0) {
+					return content(
+						formatModelList(FALLBACK_MODELS, { fallback: true }) +
+							"\n\nCursor returned an empty list; re-run cursor_import to refresh the session.",
+					);
+				}
+				return content(
+					formatModelList(models) +
+						"\n\nTo publish these to the ZCode model picker, run cursor_register_models. " +
+						"This tool only reads — it never writes ZCode's config.",
+				);
 			} catch (error) {
 				return content(
-					`Could not read Cursor's model list (${error.message}). ` +
-						"Showing the built-in fallback list instead.",
+					`Could not read Cursor's model list (${error.message}).\n\n` +
+						formatModelList(FALLBACK_MODELS, { fallback: true }),
 				);
 			}
 		},
@@ -813,7 +826,7 @@ async function handle(message) {
 			return reply({
 				protocolVersion: PROTOCOL_VERSION,
 				capabilities: { tools: {} },
-				serverInfo: { name: "cursor-subscription", "version": "0.16.0" },
+				serverInfo: { name: "cursor-subscription", version: SHIM_VERSION },
 			});
 		case "notifications/initialized":
 			return;

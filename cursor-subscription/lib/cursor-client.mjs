@@ -1396,4 +1396,46 @@ export function sortModelsByName(models) {
 	return [...models].sort((a, b) => collator.compare(nameOf(a), nameOf(b)));
 }
 
+/** A token count a human can read at a glance: 200000 → "200k", 1e6 → "1M". */
+function formatContextSize(tokens) {
+	if (tokens >= 1_000_000) return `${Math.round(tokens / 100_000) / 10}M`;
+	if (tokens >= 1000) return `${Math.round(tokens / 1000)}k`;
+	return String(tokens);
+}
+
+/**
+ * Render the model inventory for a human reader.
+ *
+ * The MCP tool used to `join("\n")` the model OBJECTS, so every line read
+ * `[object Object]` and callers scripted around the tool instead of using it.
+ * A list tool's output is its whole product: each line must name the model and
+ * show what Cursor actually declared about it, and a fallback list must say
+ * plainly that it is not the account's entitlements.
+ */
+export function formatModelList(models, { fallback = false } = {}) {
+	const list = models.map((model) => {
+		const name = nameOf(model);
+		const obj = typeof model === "string" ? {} : model;
+		const display = typeof obj.displayName === "string" && obj.displayName !== name ? `  ${obj.displayName}` : "";
+		const flags = [];
+		if (obj.contextTokenLimit) flags.push(`ctx ${formatContextSize(obj.contextTokenLimit)}`);
+		if (obj.supportsImages) flags.push("images");
+		if (obj.supportsThinking) flags.push("thinking");
+		return { name, display, flags };
+	});
+	if (list.length === 0) return "No models were returned.";
+	const width = Math.min(Math.max(...list.map((m) => m.name.length)) + 2, 40);
+	const header = fallback
+		? `${list.length} model ids from the built-in FALLBACK list. Cursor's live list could not be ` +
+			"read, so these are NOT your account's entitlements:"
+		: `${list.length} models available to the signed-in Cursor account:`;
+	return [
+		header,
+		"",
+		...list.map(
+			(m) => `  ${m.name.padEnd(width)}${m.display}${m.flags.length > 0 ? `  [${m.flags.join(", ")}]` : ""}`,
+		),
+	].join("\n");
+}
+
 export { concatBytes };

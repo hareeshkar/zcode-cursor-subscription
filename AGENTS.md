@@ -143,6 +143,12 @@ git pull
 Then reinstall from the marketplace — remove, then install again — and restart ZCode. There is no hot
 reload; ZCode copies from the marketplace into its cache at install time, and reads the cache.
 
+**Updating the plugin and updating the model list are different operations.** A plugin update replaces
+code; it does not refresh the models the account can use. To refresh the model list (new models the
+subscription gained), run the `/cursor-update-models` command — it calls `cursor_register_models`,
+writes the account's current live list into ZCode's provider config, and needs a ZCode restart to
+appear. `/cursor-models` lists the same inventory read-only.
+
 ## Remove
 
 ```

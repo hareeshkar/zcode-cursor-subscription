@@ -164,6 +164,7 @@ dead port is reported as dead.
 | `/connect-cursor-and-initialize` | **Start here.** Connects, verifies, creates the provider and registers every model |
 | `/cursor-status` | Sign-in state, token expiry, shim health and resume rate |
 | `/cursor-models` | List the models your account can use, without changing anything |
+| `/cursor-update-models` | Refresh the picker with the account's current model list (restart ZCode after) |
 | `/uninstall-cursor-and-plugin` | Remove the plugin completely so a reinstall starts clean |
 
 ## Tools
