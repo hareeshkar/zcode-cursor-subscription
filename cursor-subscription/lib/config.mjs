@@ -125,6 +125,51 @@ export function dataDir() {
 	return join(homedir(), ".cursor-subscription");
 }
 
+/**
+ * Custom model ids that are usable through Cursor's agent even though the
+ * GetUsableModels catalog omits them.
+ *
+ * Live example (2026-10): `glm-5p3-flash` / `glm-5p3-flash-high` answer real
+ * completions through agent.v1 on accounts the IDE shows them to, while the
+ * catalog endpoint keeps returning the older glm-5.2 set — a staged rollout
+ * the IDE learns about through its own settings path. The workaround that
+ * needs no reverse-engineering of that path: let the user (or their session)
+ * name the ids once, here. Both sources are read and merged:
+ *
+ *  - `CURSOR_CUSTOM_MODELS` — comma/whitespace-separated ids, for one-off runs
+ *  - `<data dir>/custom-models.json` — a JSON array, persisted across runs
+ *
+ * Ids are validated cheaply (id-shaped: lowercase, digits, dots, dashes,
+ * underscores). Everything downstream probes before it publishes, so a wrong
+ * id costs one failed probe, never a broken picker.
+ */
+export function parseCustomModelIds(value) {
+	if (typeof value !== "string" || value.trim().length === 0) return [];
+	return [
+		...new Set(
+			value
+				.split(/[\s,]+/)
+				.map((id) => id.trim())
+				.filter((id) => /^[a-z0-9][a-z0-9._-]*$/i.test(id)),
+		),
+	];
+}
+
+/** The configured custom model ids from both sources, env first. */
+export function customModelIds() {
+	const ids = new Set(parseCustomModelIds(process.env.CURSOR_CUSTOM_MODELS));
+	try {
+		const raw = readFileSync(join(dataDir(), "custom-models.json"), "utf8");
+		const parsed = JSON.parse(raw);
+		if (Array.isArray(parsed)) {
+			for (const id of parseCustomModelIds(parsed.join(","))) ids.add(id);
+		}
+	} catch {
+		// No file, or unreadable: env alone is fine.
+	}
+	return [...ids];
+}
+
 export function credentialsPath() {
 	return join(dataDir(), "credentials.json");
 }

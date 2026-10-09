@@ -1343,8 +1343,12 @@ export class AgentRun {
  * The body is the raw (unframed) empty protobuf message. Cursor may answer with
  * either raw protobuf or Connect frames, so both are tried.
  */
-export async function fetchUsableModels(accessToken, { fetchImpl, signal } = {}) {
+export async function fetchUsableModels(accessToken, { fetchImpl, signal, customModelIds = [] } = {}) {
 	const doFetch = fetchImpl ?? globalThis.fetch;
+	// GetUsableModelsRequest | 1 custom_model_ids (repeated string). Sent only
+	// when the user has named custom ids — an empty body is the proven path.
+	const writer = new Writer();
+	for (const id of customModelIds) writer.string(1, id);
 	const response = await doFetch(`${CURSOR_BASE_URL}${CURSOR_MODELS_PATH}`, {
 		method: "POST",
 		redirect: "error",
@@ -1355,7 +1359,11 @@ export async function fetchUsableModels(accessToken, { fetchImpl, signal } = {})
 			"x-cursor-client-version": AGENT_HEADERS["x-cursor-client-version"],
 			"x-cursor-client-type": "cli",
 		},
-		body: new Uint8Array(0),
+		// The request carries the ids so the server can resolve them where it
+		// knows them; the merge below covers ids it does not echo back — which
+		// is the live case for staged models like glm-5p3-flash that agent.v1
+		// accepts long before the catalog lists them.
+		body: customModelIds.length > 0 ? writer.finish() : new Uint8Array(0),
 		signal,
 	});
 	if (!response.ok) {
@@ -1365,7 +1373,7 @@ export async function fetchUsableModels(accessToken, { fetchImpl, signal } = {})
 	if (bytes.length === 0) throw new CursorError("Cursor model discovery returned an empty response");
 
 	const direct = decodeUsableModels(bytes);
-	if (direct.length > 0) return direct;
+	if (direct.length > 0) return mergeCustomModels(direct, customModelIds);
 
 	const reader = new ConnectFrameReader();
 	reader.push(bytes);
@@ -1377,7 +1385,26 @@ export async function fetchUsableModels(accessToken, { fetchImpl, signal } = {})
 		if ((frame.flags & CONNECT_END_STREAM_FLAG) !== 0) break;
 		models.push(...decodeUsableModels(frame.payload));
 	}
-	return models;
+	return mergeCustomModels(models, customModelIds);
+}
+
+/**
+ * Merge configured custom model ids into a fetched catalog.
+ *
+ * Ids the catalog already contains are left untouched (their real capability
+ * flags win). Ids it does not contain are added with `custom: true` and
+ * conservative flags — the picker labels them, and the register/probe path
+ * still confirms them with one real request before anyone depends on them.
+ */
+export function mergeCustomModels(models, customModelIds) {
+	const present = new Set(modelIds(models));
+	const extras = [];
+	for (const id of customModelIds) {
+		if (present.has(id)) continue;
+		present.add(id);
+		extras.push({ name: id, supportsImages: false, supportsThinking: false, custom: true });
+	}
+	return [...models, ...extras];
 }
 
 /** A model's id, whether it arrived as a string or a decoded object. */
@@ -1421,6 +1448,7 @@ export function formatModelList(models, { fallback = false } = {}) {
 		if (obj.contextTokenLimit) flags.push(`ctx ${formatContextSize(obj.contextTokenLimit)}`);
 		if (obj.supportsImages) flags.push("images");
 		if (obj.supportsThinking) flags.push("thinking");
+		if (obj.custom) flags.push("custom");
 		return { name, display, flags };
 	});
 	if (list.length === 0) return "No models were returned.";

@@ -27,7 +27,7 @@ import { pickProbeModels, probeModel } from "../lib/selftest.mjs";
 import { registerModels, ensureShimProvider, reconcileProviderKey } from "../lib/register-provider.mjs";
 import { removeShimProvider, removePluginInstallation } from "../lib/uninstall.mjs";
 import { compareEndpoints, inspectProviderConfig } from "../lib/diagnose.mjs";
-import { DEFAULT_SHIM_PORT, FALLBACK_MODELS, SHIM_HOST, SHIM_PATHS, dataDir } from "../lib/config.mjs";
+import { DEFAULT_SHIM_PORT, FALLBACK_MODELS, SHIM_HOST, SHIM_PATHS, customModelIds, dataDir } from "../lib/config.mjs";
 
 const PROTOCOL_VERSION = "2025-06-18";
 const SHIM_VERSION = require("../package.json").version;
@@ -294,7 +294,9 @@ const TOOLS = [
 			}
 			const baseUrl = await shimBaseUrl();
 			const token = await auth.accessToken();
-			const available = sortModelsByName(await fetchUsableModels(token));
+			const available = sortModelsByName(
+				await fetchUsableModels(token, { customModelIds: customModelIds() }),
+			);
 			const limit = Number(args.models);
 			const models =
 				Number.isFinite(limit) && limit > 0
@@ -304,17 +306,37 @@ const TOOLS = [
 						)
 					: available;
 
+			// Custom ids (staged models the catalog omits, like glm-5p3-flash)
+			// are confirmed with one real cheap request each before they are
+			// published: a wrong id must cost a failed probe, never a picker
+			// entry that errors on first use. Under a cap they are kept
+			// regardless of the cap — the user named them on purpose.
+			const customIncluded = models.filter((m) => typeof m === "object" && m?.custom);
+			const customResults = [];
+			for (const custom of customIncluded) {
+				const probe = await probeModel(await shimOrigin(), shim.apiKey, custom.name);
+				customResults.push({ id: custom.name, ok: probe.ok, detail: probe.detail });
+			}
+			const failedCaps = new Set(customResults.filter((r) => !r.ok).map((r) => r.id));
+			const publishable = models.filter((m) => !(typeof m === "object" && m?.custom && failedCaps.has(m.name)));
+
 			const result = await registerModels({
-				models,
+				models: publishable,
 				baseUrl,
 				...(args.rename ? { providerName: args.rename } : {}),
 			});
 			if (!result.ok) return content(`${result.advice}\n\n(reason: ${result.reason})`, true);
+			const customNotes = customResults.map(
+				(r) => `  ${r.ok ? "PASS" : "SKIPPED (probe failed)"}  ${r.id}  ${r.detail}`,
+			);
 			return content(
 				`Registered ${result.total} models on provider "${result.providerName}" ` +
 					`(${result.added} newly added, base URL ${baseUrl}` +
-					`${result.baseUrlUpdated ? ", updated to follow the shim's port" : ""}).\n\n` +
-					"Tell the user to reload ZCode — the model picker reads the provider config at " +
+					`${result.baseUrlUpdated ? ", updated to follow the shim's port" : ""}).` +
+					(customNotes.length > 0
+						? `\n\nCustom models (from CURSOR_CUSTOM_MODELS / custom-models.json):\n${customNotes.join("\n")}`
+						: "") +
+					"\n\nTell the user to reload ZCode — the model picker reads the provider config at " +
 					"startup, so the list will not appear until then. The models are then selectable " +
 					"from the model picker like any other.",
 			);
@@ -378,7 +400,9 @@ const TOOLS = [
 				return content(["Setup stopped — nothing is listening yet.", "", ...steps.map((s) => `  - ${s}`)].join("\n"), true);
 			}
 
-			const available = sortModelsByName(await fetchUsableModels(await auth.accessToken()));
+			const available = sortModelsByName(
+				await fetchUsableModels(await auth.accessToken(), { customModelIds: customModelIds() }),
+			);
 			// Two different jobs, and conflating them was the bug: a probe is a real
 			// billable request, so it stays on cheap models to protect the user's
 			// quota — but the probe is a transport check, not a catalogue. The user
@@ -386,8 +410,11 @@ const TOOLS = [
 			// they can see what their subscription actually includes. So publish
 			// everything the account reports, not just what was cheap enough to test.
 			const probeSet = pickProbeModels(modelIds(available), { limit: 6 });
+			// Custom ids ride along: they are few, the user named them on
+			// purpose, and each probe is what keeps a wrong id out of the picker.
+			const customSet = available.filter((m) => typeof m === "object" && m?.custom).map((m) => m.name);
 			const probes = [];
-			for (const model of probeSet) {
+			for (const model of [...probeSet, ...customSet]) {
 				probes.push(await probeModel(await shimOrigin(), shim.apiKey, model));
 			}
 			const passed = probes.filter((p) => p.ok);
@@ -790,7 +817,7 @@ const TOOLS = [
 		run: async () => {
 			try {
 				const token = await auth.accessToken();
-				const models = sortModelsByName(await fetchUsableModels(token));
+				const models = sortModelsByName(await fetchUsableModels(token, { customModelIds: customModelIds() }));
 				if (models.length === 0) {
 					return content(
 						formatModelList(FALLBACK_MODELS, { fallback: true }) +

@@ -128,6 +128,22 @@ counts), and `/internal/status` carries the same counters with resume telemetry 
 always see which path a turn actually took, and a model that regenerates the identical call is
 broken out of the loop with a legible advisory instead of burning quota.
 
+### Custom models (staged ids the catalog omits)
+
+Cursor sometimes accepts a model through its agent long before `GetUsableModels` lists it — live
+example (Oct 2026): `glm-5p3-flash` / `glm-5p3-flash-high` answer real completions while the catalog
+still returns the older `glm-5.2` set. Such ids are how the Cursor IDE shows models the CLI-side
+catalog does not. Name them once and the plugin treats them as first-class:
+
+- `CURSOR_CUSTOM_MODELS=glm-5p3-flash,glm-5p3-flash-high` (environment), or
+- a JSON array in `~/.zcode/cli/plugins/data/cursor-subscription@dev-zcode-cursor-b9b95b48/custom-models.json`
+
+They are merged into every fetch (listed by `/cursor-models` with a `custom` tag) and, before being
+published to the picker, **each is confirmed with one real cheap request** — `/cursor-update-models`
+will not write a model that does not answer. A wrong id costs a failed probe, never a broken picker
+entry. The working set is registered like any other model, so `glm-5p3-flash` becomes selectable in
+ZCode through your Cursor subscription.
+
 ### Context and cost
 
 ZCode owns the conversation and rewrites it between turns — auto-compaction, microcompaction, edits and

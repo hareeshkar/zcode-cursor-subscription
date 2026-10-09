@@ -63,3 +63,34 @@ test("the self-test selector receives ids, so probes are actually chosen", () =>
 	assert.equal(picked[0], "composer-2.5-fast", "the cheap preferred family still ranks first");
 	for (const id of picked) assert.equal(typeof id, "string");
 });
+
+// --- custom models: staged ids the catalog omits ---------------------------
+
+import { parseCustomModelIds } from "../lib/config.mjs";
+import { mergeCustomModels } from "../lib/cursor-client.mjs";
+
+test("custom model ids parse from comma/space lists and reject junk", () => {
+	assert.deepEqual(parseCustomModelIds("glm-5p3-flash, glm-5p3-flash-high"), ["glm-5p3-flash", "glm-5p3-flash-high"]);
+	assert.deepEqual(parseCustomModelIds("a-b\nc.d_e"), ["a-b", "c.d_e"]);
+	assert.deepEqual(parseCustomModelIds("glm-5p3-flash glm-5p3-flash"), ["glm-5p3-flash"], "duplicates collapse");
+	assert.deepEqual(parseCustomModelIds("bad!!id, ../escape, ok-id"), ["ok-id"], "tokens that are not id-shaped are dropped whole");
+	assert.deepEqual(parseCustomModelIds(""), []);
+	assert.deepEqual(parseCustomModelIds(undefined), []);
+});
+
+test("custom ids merge without displacing catalog entries", () => {
+	const catalog = [{ name: "glm-5.2-high" }, { name: "composer-2.5" }];
+	const merged = mergeCustomModels(catalog, ["glm-5p3-flash", "composer-2.5"]);
+	assert.equal(merged.length, 3, "one new entry, and the existing catalogue entry is not duplicated");
+	const custom = merged.find((m) => m.name === "glm-5p3-flash");
+	assert.equal(custom.custom, true, "a merged entry is marked custom so the formatter and register path can see it");
+	const known = merged.find((m) => m.name === "composer-2.5");
+	assert.equal(known.custom, undefined, "a catalog entry keeps its real identity");
+	assert.equal(mergeCustomModels(catalog, []).length, 2, "no ids means no change");
+});
+
+test("a custom entry renders with the custom flag", () => {
+	const text = formatModelList([{ name: "glm-5p3-flash", custom: true }]);
+	assert.ok(text.includes("glm-5p3-flash"));
+	assert.ok(text.includes("custom"), "the picker list says which entries are custom");
+});

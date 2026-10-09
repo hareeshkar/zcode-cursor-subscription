@@ -18,6 +18,10 @@ Report to the user:
 Pass `models: N` only if the user asks to cap the list to a short one; the default publishes every
 model the account can use, which is what most people want — the picker searches.
 
+Custom models configured via `CURSOR_CUSTOM_MODELS` or `custom-models.json` are included and each is
+probe-confirmed before publishing; the tool's report says which answered. They are kept even when a
+`models` cap is set — the user named them on purpose.
+
 ## Do not do any of this by hand
 
 - Do not edit `provider_config.json` or anything under `~/.zcode/cli/plugins/` with your own file

@@ -1,6 +1,6 @@
 {
   "name": "cursor-subscription",
-  "version": "0.24.4",
+  "version": "0.25.1",
   "description": "Use a Cursor subscription as a first-class ZCode provider: Cursor models appear in the model picker, with ZCode's own tools, permissions and context management.",
   "description_i18n": {
     "en": "Use a Cursor subscription as a first-class ZCode provider: Cursor models appear in the model picker, with ZCode's own tools, permissions and context management.",
